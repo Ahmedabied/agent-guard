@@ -237,3 +237,11 @@ def test_parse_strict():
     for bad in [b'{"a":1,"a":2}', b'{"a":Infinity}', b'\xff\xfe{}', b'{"a":']:
         with pytest.raises(ValueError):
             parse_strict(bad)
+
+
+def test_blocked_result_matches_the_protocol_version(s):
+    meta = {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}
+    new = s.request("tools/call", {"name": "delete_file", "arguments": {"path": s.path("notes/plan.md")}, "_meta": meta})
+    old = s.call("delete_file", path=s.path("notes/plan.md"))
+    assert new["result"]["resultType"] == "complete" and new["result"]["isError"] is True
+    assert "resultType" not in old["result"]  # 2025 peers may reject unknown keys

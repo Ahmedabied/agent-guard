@@ -1,0 +1,31 @@
+# Regression cases for examples/guard.yaml. CI replays them on every push:
+#   agent-guard test -p examples/guard.yaml examples/guard-tests.yaml
+# `agent-guard learn` appends a case here each time an incident becomes a rule.
+- name: notes-cannot-be-deleted
+  tool: delete_file
+  args: {path: /tmp/agent-guard-demo/notes/plan.md}
+  expect: deny
+- name: notes-cannot-be-overwritten
+  tool: write_file
+  args: {path: /tmp/agent-guard-demo/notes/plan.md, content: ""}
+  expect: deny
+- name: traversal-out-of-scratch
+  tool: delete_file
+  args: {path: /tmp/agent-guard-demo/scratch/../notes/plan.md}
+  expect: deny
+- name: deletes-outside-the-demo-folder
+  tool: delete_file
+  args: {path: /home/someone/.ssh/id_ed25519}
+  expect: deny
+- name: scratch-deletes-pass
+  tool: delete_file
+  args: {path: /tmp/agent-guard-demo/scratch/old.txt}
+  expect: allow
+- name: reads-pass
+  tool: read_file
+  args: {path: /tmp/agent-guard-demo/notes/plan.md}
+  expect: allow
+- name: unknown-tools-are-denied
+  tool: run_shell
+  args: {cmd: "rm -rf /"}
+  expect: deny

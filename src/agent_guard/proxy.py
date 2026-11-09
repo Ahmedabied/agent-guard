@@ -27,6 +27,17 @@ from .policy import Decision, Policy
 Approver = Callable[[str, Any, Decision], "tuple[bool, str]"]
 
 
+VERSION_META = "io.modelcontextprotocol/protocolVersion"
+RESULT_TYPE_SINCE = "2026-07-28"  # from this version on, every result must carry resultType
+
+
+def _wants_result_type(params: Any) -> bool:
+    # 2026-07-28 sessions have no initialize; each request names its version in _meta.
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    version = meta.get(VERSION_META) if isinstance(meta, dict) else None
+    return isinstance(version, str) and version >= RESULT_TYPE_SINCE
+
+
 def _key(msg_id: Any) -> str:
     return json.dumps(msg_id, sort_keys=True)
 
@@ -276,7 +287,7 @@ class Proxy:
             self.stats["denied"] += 1
             self._say(f"denied {name} (rule {decision.rule}): {decision.reason}")
             if has_id:
-                self._blocked(msg_id, name, decision.rule, decision.reason)
+                self._blocked(msg, name, decision.rule, decision.reason)
             return False
         self.stats["asked"] += 1
         threading.Thread(target=self._ask, args=(msg, name, args, decision), daemon=True).start()
@@ -287,10 +298,12 @@ class Proxy:
             with self._state_lock:
                 self._pending[_key(msg_id)] = (msg_id, name, time.perf_counter_ns())
 
-    def _blocked(self, msg_id: Any, name: str, rule: str, reason: str) -> None:
+    def _blocked(self, msg: dict, name: str, rule: str, reason: str) -> None:
         text = f"agent-guard blocked this call to {name}: {reason} (rule: {rule})"
-        self._to_client(_line({"jsonrpc": "2.0", "id": msg_id,
-                               "result": {"content": [{"type": "text", "text": text}], "isError": True}}))
+        result: dict = {"content": [{"type": "text", "text": text}], "isError": True}
+        if _wants_result_type(msg.get("params")):
+            result["resultType"] = "complete"
+        self._to_client(_line({"jsonrpc": "2.0", "id": msg.get("id"), "result": result}))
 
     def _ask(self, msg: dict, name: str, args: Any, decision: Decision) -> None:
         try:
@@ -307,7 +320,7 @@ class Proxy:
         else:
             self._say(f"denied {name} after ask: {how}")
             if "id" in msg:
-                self._blocked(msg_id, name, decision.rule, f"needs approval and was not approved ({how})")
+                self._blocked(msg, name, decision.rule, f"needs approval and was not approved ({how})")
 
     # ---- server to client -----------------------------------------------------------------
 
