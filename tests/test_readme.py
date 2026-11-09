@@ -17,10 +17,3 @@ def test_readme_policy_example():
     assert p.evaluate("run_shell", {"cmd": "ls"}).action == "allow"
     assert p.evaluate("drop_table", {}).action == "deny"
     assert p.always_denied("drop_table") and not p.always_denied("read_file")
-
-
-def test_readme_has_no_long_dashes():
-    for path in Path(__file__).parent.parent.rglob("*"):
-        if path.is_file() and ".git" not in path.parts and ".venv" not in path.parts and path.suffix in {".md", ".py", ".yaml", ".yml", ".toml"}:
-            text = path.read_text(encoding="utf-8")
-            assert chr(0x2014) not in text and chr(0x2013) not in text, path

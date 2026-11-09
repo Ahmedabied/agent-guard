@@ -171,6 +171,7 @@ class Proxy:
         self._pending: dict[str, tuple[Any, str, int]] = {}
         self._list_ids: set[str] = set()
         self._done = threading.Event()
+        self.internal_errors = 0
         self.stats = {"allowed": 0, "denied": 0, "asked": 0}
 
     # ---- plumbing -------------------------------------------------------------------------
@@ -201,8 +202,8 @@ class Proxy:
         try:
             self.audit.append(record)
             return True
-        except (AuditError, OSError) as e:
-            self._say(f"audit log write failed: {e}")
+        except Exception as e:  # noqa: BLE001  any failure to log means the call is denied
+            self._say(f"audit log write failed: {type(e).__name__}: {e}"[:300])
             return False
 
     # ---- client to server -----------------------------------------------------------------
@@ -214,19 +215,38 @@ class Proxy:
                     continue
                 try:
                     msg = parse_strict(raw)
-                except ValueError as e:  # never forward what we could not judge
+                except (ValueError, RecursionError) as e:  # never forward what we could not judge
                     self._log({"event": "rejected", "reason": f"unparseable client message: {e}"[:300]})
                     self._to_client(_line({"jsonrpc": "2.0", "id": None, "error": {
                         "code": -32700, "message": f"agent-guard: parse error: {e}"[:300]}}))
                     continue
-                if isinstance(msg, list):
-                    self._batch(msg)
-                elif isinstance(msg, dict):
-                    self._message(msg)
-                else:
-                    self._to_server(_line(msg))
+                try:
+                    if isinstance(msg, list):
+                        self._batch(msg)
+                    elif isinstance(msg, dict):
+                        self._message(msg)
+                    else:
+                        self._to_server(_line(msg))
+                except Exception as e:  # noqa: BLE001  one bad message must not take the guard down
+                    self._internal_error(msg, e)
         finally:
             self._done.set()
+
+    def _internal_error(self, msg: Any, err: Exception) -> None:
+        """A message the guard failed to judge is denied, logged if possible, and answered, and
+        the guard keeps serving. The exit code reports it afterwards."""
+        self.internal_errors += 1
+        reason = f"internal error while judging: {type(err).__name__}"
+        self._say(f"{reason}: {err}"[:300])
+        try:
+            self._log({"event": "rejected", "reason": reason})
+        except Exception:  # noqa: BLE001
+            pass
+        items = msg if isinstance(msg, list) else [msg]
+        replies = [{"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32603, "message": f"agent-guard: {reason}"}}
+                   for m in items if isinstance(m, dict) and "id" in m and "method" in m]
+        if replies:
+            self._to_client(_line(replies if isinstance(msg, list) else replies[0]))
 
     def _message(self, msg: dict) -> None:
         # Everything forwarded is re-serialised from the parsed message, so the server receives
@@ -405,4 +425,6 @@ class Proxy:
                 self.proc.kill()
                 code = self.proc.wait()
         threads[0].join(timeout=2)
+        if self.internal_errors and not (code and code > 0):
+            return 70  # EX_SOFTWARE: the guard denied messages it failed to judge; see stderr
         return code if code and code > 0 else 0

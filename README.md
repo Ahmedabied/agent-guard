@@ -19,7 +19,8 @@ agent (MCP client)  <--stdio-->  agent-guard  <--stdio-->  MCP server (files, sh
 - **Blocked calls fail softly.** The agent gets a normal tool error with the reason, so it can change course.
   The server never sees the call.
 - **Audit log you can check.** Every decision and result is one JSON line, hash-chained to the line before it.
-  `agent-guard verify` finds the first edited, removed or reordered line.
+  `agent-guard verify` finds the first edited, removed or reordered line, as long as the head hash is kept
+  somewhere the agent cannot write (see Limits).
 - **A mistake happens once.** `agent-guard learn` turns an incident from the log into a new rule plus a
   regression test. `agent-guard test` replays those tests in CI, so nobody can quietly loosen the policy later.
 - **Tools that can never pass are hidden** from `tools/list`, so the agent does not waste turns on them.
@@ -122,9 +123,9 @@ rules:
 |---|---|
 | `"text*"` (a plain string) or `glob:` | glob match, `*` matches any characters including `/` |
 | `regex:` | Python regex, searched anywhere in the value |
-| `under:` | the path, after normalising `.`, `..` and `//`, is inside one of these folders |
+| `under:` | the path, after normalising `.`, `..` and `//`, is inside one of these folders. A value that is not an absolute path (`notes/a.md`, `~/a.md`, `file://...`) cannot be placed, so it matches deny and ask rules and never satisfies allow rules |
 | `equals:` | exact value; `true` does not equal `1` |
-| `contains:` | substring of a string, or item of a list |
+| `contains:` | substring of a string, or item of a list. In deny and ask rules it also finds the text inside any string in a list or object (`["bash", "-c", "rm -rf /"]`) |
 | `not_glob:` `not_regex:` `not_under:` | the opposite |
 
 Arguments are named by key, or by a dotted path into nested objects (`options.force`, `files.0`). The matching
@@ -200,8 +201,11 @@ at most the result lines of calls still in flight; a power cut can lose the last
   share a filesystem with the server. Pair agent-guard with server-side limits (allowed folders, read-only users,
   containers) and use it for policy, approval and the record.
 - **Rate limits live in memory**, per agent-guard process. Restarting resets them.
-- **The audit chain proves order and content, not existence.** Deleting the whole file, or cutting lines from
-  the end, is only caught if you keep the head hash somewhere else.
+- **The audit chain has no key.** Anyone who can write the file can rewrite it and recompute every hash, and
+  `verify` will say ok. Deleting the file or cutting lines from the end is the same. The chain catches accidents
+  and careless edits; against a writer who means it, keep the head hash (`--expect-head`) on another machine.
+- **A message the guard fails to judge is denied**, answered with an error and logged, and the guard keeps
+  serving. It then exits with code 70 so the failure is not silent.
 - **Old-style JSON-RPC batches** (2025-03-26) are split: denied calls in a batch are answered one by one.
 - File locking for several writers on one log is Unix only.
 
@@ -209,7 +213,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk]'
-pytest -q                      # 67 tests
+pytest -q                      # 76 tests
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

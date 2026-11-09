@@ -139,41 +139,62 @@ class Condition:
             elif op == "contains":
                 if isinstance(value, str):
                     ok = isinstance(arg, str) and arg in value
-                elif isinstance(value, list):
-                    ok = any(_same(v, arg) for v in value)
+                elif isinstance(value, (list, dict)):
+                    ok = isinstance(value, list) and any(_same(v, arg) for v in value)
+                    if not ok and not strict and isinstance(arg, str):
+                        # deny and ask: the text anywhere inside is enough (["bash", "-c", "rm -rf /"])
+                        ok = any(isinstance(v, str) and arg in v for v in _leaves(value, keys=True))
                 else:
                     ok = False
             elif isinstance(value, (dict, list)):
                 if strict:  # allow rules: every value inside must pass
                     leaves = list(_leaves(value))
-                    ok = bool(leaves) and all(_check(op, arg, v) for v in leaves)
+                    ok = bool(leaves) and all(_check(op, arg, v, strict) for v in leaves)
                 elif op.startswith("not_"):  # deny and ask: one value outside is enough
                     leaves = list(_leaves(value))
-                    ok = not leaves or any(_check(op, arg, v) for v in leaves)  # empty: fail closed
+                    ok = not leaves or any(_check(op, arg, v, strict) for v in leaves)  # empty: fail closed
+                elif op == "under":  # deny and ask: any value inside, or any absolute-path key
+                    ok = any(_check(op, arg, v, strict) for v in _leaves(value)) or any(
+                        _check(op, arg, k, strict) for k in _keys(value) if isinstance(k, str) and k.startswith("/")
+                    )
                 else:  # deny and ask: a value, a key or the whole JSON text matching is enough
-                    ok = any(_check(op, arg, v) for v in _leaves(value, keys=True)) or _check(
-                        op, arg, canonical(value)
+                    ok = any(_check(op, arg, v, strict) for v in _leaves(value, keys=True)) or _check(
+                        op, arg, canonical(value), strict
                     )
             else:
-                ok = _check(op, arg, value)
+                ok = _check(op, arg, value, strict)
             if not ok:
                 return False
         return True
 
 
-def _check(op: str, arg: Any, value: Any) -> bool:
-    if op == "under":
-        return isinstance(value, str) and _is_under(value, arg)
-    if op == "not_under":
-        return not (isinstance(value, str) and _is_under(value, arg))
+def _check(op: str, arg: Any, value: Any, strict: bool = False) -> bool:
+    """strict=True for allow rules, False for deny and ask. When the guard cannot tell what a
+    value means, deny and ask rules match and allow rules do not (fail closed)."""
+    if op in ("under", "not_under"):
+        if not (isinstance(value, str) and value.startswith("/")):
+            # "notes/plan.md", "~/x", "file:///etc", a list: the tool server decides where these
+            # land (most resolve relative paths against their root and expand "~"), so the guard
+            # cannot place them. Treat them as matching a deny rule and failing an allow rule.
+            return not strict
+        inside = _is_under(value, arg)
+        return inside if op == "under" else not inside
     text = value if isinstance(value, str) else canonical(value)
+    # Path-like strings are judged both as written and with "..", "." and "//" collapsed, so
+    # "/workspace/../etc/shadow" cannot pass an allow glob of "/workspace/*".
+    texts = [text]
+    if isinstance(value, str) and "/" in value:
+        norm = _norm_path(value)
+        if norm != text:
+            texts.append(norm)
+    pick = all if strict else any
     if op == "glob":
-        return arg.match(text) is not None
+        return pick(arg.match(t) is not None for t in texts)
     if op == "not_glob":
-        return arg.match(text) is None
+        return pick(arg.match(t) is None for t in texts)
     if op == "regex":
-        return arg.search(text) is not None
-    return arg.search(text) is None  # not_regex
+        return pick(arg.search(t) is not None for t in texts)
+    return pick(arg.search(t) is None for t in texts)  # not_regex
 
 
 _MISSING = object()
@@ -213,6 +234,16 @@ def _leaves(value: Any, keys: bool = False):
             yield from _leaves(v, keys)
     else:
         yield value
+
+
+def _keys(value: Any):
+    if isinstance(value, dict):
+        for k, v in value.items():
+            yield k
+            yield from _keys(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _keys(v)
 
 
 def parse_rate(text: Any, where: str) -> tuple[int, float]:

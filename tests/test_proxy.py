@@ -245,3 +245,27 @@ def test_blocked_result_matches_the_protocol_version(s):
     old = s.call("delete_file", path=s.path("notes/plan.md"))
     assert new["result"]["resultType"] == "complete" and new["result"]["isError"] is True
     assert "resultType" not in old["result"]  # 2025 peers may reject unknown keys
+
+
+def test_relative_path_cannot_slip_past_a_deny_rule(s):
+    # the demo server resolves relative paths against its root, like the official filesystem server
+    r = s.call("write_file", path="notes/plan.md", content="PWNED")
+    assert r["result"]["isError"] is True
+    assert (s.root / "notes" / "plan.md").read_text() == "keep me"
+
+
+@pytest.mark.parametrize("bad", [{"text": "\ud800"}, {"text": [[[[0]]]] }])
+def test_a_message_the_guard_cannot_judge_is_denied_and_the_guard_keeps_serving(s, bad):
+    if "text" in bad and isinstance(bad["text"], list):
+        nested = 0
+        for _ in range(5000):
+            nested = [nested]
+        bad = {"text": nested}
+    raw = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                      "params": {"name": "echo", "arguments": bad}})
+    s.send(raw.encode())
+    r = s.recv()
+    assert r["id"] == 7 and ("error" in r or r["result"]["isError"] is True)
+    ok = s.call("echo", text="still here")
+    assert ok["result"]["isError"] is False
+    assert s.close() in (0, 70)

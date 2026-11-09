@@ -225,3 +225,47 @@ rules:
 """)
     assert p.evaluate("rm", {"opts.path": "/sandbox/x"}).action == "deny"
     assert p.evaluate("rm", {"opts": {"path": "/sandbox/x"}}).action == "allow"
+
+
+# Found in an independent review (2026-11-09): values the guard cannot place must fail closed.
+UNDER = """
+default: deny
+rules:
+  - {name: notes-read-only, tool: write_file, args: {path: {under: /work/notes}}, decision: deny}
+  - {name: work, tool: write_file, args: {path: {under: /work}}, decision: allow}
+"""
+
+
+@pytest.mark.parametrize("path", ["notes/plan.md", "./notes/plan.md", "~/notes/plan.md", "file:///work/notes/x"])
+def test_paths_that_are_not_absolute_hit_deny_rules(path):
+    d = Policy.from_yaml(UNDER).evaluate("write_file", {"path": path})
+    assert (d.action, d.rule) == ("deny", "notes-read-only")
+
+
+def test_paths_that_are_not_absolute_never_satisfy_allow_rules():
+    p = Policy.from_yaml(UNDER.replace("decision: deny", "decision: ask"))
+    assert p.evaluate("write_file", {"path": "/work/src/a.py"}).action == "allow"
+    # the deny rule is now "ask", so the relative path reaches the allow rule and must not pass it
+    assert Policy.from_yaml("default: deny\nrules:\n  - {name: work, tool: write_file, args: {path: {under: /work}}, decision: allow}\n"
+                            ).evaluate("write_file", {"path": "src/a.py"}).action == "deny"
+
+
+def test_contains_finds_text_inside_lists_and_mappings_for_deny():
+    p = Policy.from_yaml("""
+default: allow
+rules:
+  - {name: no-rm-rf, tool: run, args: {cmd: {contains: "rm -rf"}}, decision: deny}
+""")
+    for cmd in ["rm -rf /", ["bash", "-c", "rm -rf /"], {"x": "rm -rf /"}]:
+        assert p.evaluate("run", {"cmd": cmd}).action == "deny", cmd
+    assert p.evaluate("run", {"cmd": ["ls", "-la"]}).action == "allow"
+
+
+def test_allow_glob_is_checked_on_the_normalised_path_too():
+    p = Policy.from_yaml("""
+default: deny
+rules:
+  - {name: workspace, tool: read_file, args: {path: "/workspace/*"}, decision: allow}
+""")
+    assert p.evaluate("read_file", {"path": "/workspace/a.txt"}).action == "allow"
+    assert p.evaluate("read_file", {"path": "/workspace/../etc/shadow"}).action == "deny"
