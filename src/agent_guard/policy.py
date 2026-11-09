@@ -28,7 +28,6 @@ _UNITS = {
     "m": 60, "min": 60, "minute": 60, "minutes": 60,
     "h": 3600, "hour": 3600, "hours": 3600,
 }
-_MISSING = object()
 
 
 class PolicyError(ValueError):
@@ -145,9 +144,16 @@ class Condition:
                 else:
                     ok = False
             elif isinstance(value, (dict, list)):
-                leaves = list(_leaves(value))
-                quantifier = all if strict else any
-                ok = bool(leaves) and quantifier(_check(op, arg, v) for v in leaves)
+                if strict:  # allow rules: every value inside must pass
+                    leaves = list(_leaves(value))
+                    ok = bool(leaves) and all(_check(op, arg, v) for v in leaves)
+                elif op.startswith("not_"):  # deny and ask: one value outside is enough
+                    leaves = list(_leaves(value))
+                    ok = not leaves or any(_check(op, arg, v) for v in leaves)  # empty: fail closed
+                else:  # deny and ask: a value, a key or the whole JSON text matching is enough
+                    ok = any(_check(op, arg, v) for v in _leaves(value, keys=True)) or _check(
+                        op, arg, canonical(value)
+                    )
             else:
                 ok = _check(op, arg, value)
             if not ok:
@@ -170,32 +176,35 @@ def _check(op: str, arg: Any, value: Any) -> bool:
     return arg.search(text) is None  # not_regex
 
 
-def _lookup(args: Any, key: str) -> Any:
-    """A plain key reads one argument. A dotted key ("opts.force", "files.0") is always a
-    nested path, never a literal key, so a caller cannot shadow it with an argument that
-    happens to contain dots."""
+def _lookup(args: Any, key: str) -> list:
+    """Every value the key could mean. A plain key reads one argument. A dotted key
+    ("opts.force", "files.0") could mean a nested path or a literal key with dots in it, so
+    both readings are returned and the rule checks them all."""
     if not isinstance(args, dict):
-        return _MISSING
-    if "." not in key:
-        return args.get(key, _MISSING)
-    cur: Any = args
-    for part in key.split("."):
-        if isinstance(cur, dict) and part in cur:
-            cur = cur[part]
-        elif isinstance(cur, list) and part.isdigit() and int(part) < len(cur):
-            cur = cur[int(part)]
-        else:
-            return _MISSING
-    return cur
+        return []
+    found = [args[key]] if key in args else []
+    if "." in key:
+        cur: Any = args
+        for part in key.split("."):
+            if isinstance(cur, dict) and part in cur:
+                cur = cur[part]
+            elif isinstance(cur, list) and part.isdigit() and int(part) < len(cur):
+                cur = cur[int(part)]
+            else:
+                return found
+        found.append(cur)
+    return found
 
 
-def _leaves(value: Any):
+def _leaves(value: Any, keys: bool = False):
     if isinstance(value, dict):
-        for v in value.values():
-            yield from _leaves(v)
+        for k, v in value.items():
+            if keys:
+                yield k
+            yield from _leaves(v, keys)
     elif isinstance(value, list):
         for v in value:
-            yield from _leaves(v)
+            yield from _leaves(v, keys)
     else:
         yield value
 
@@ -252,13 +261,19 @@ class Rule:
         strict = self.action == "allow"
         for key, cond in self.conditions:
             if key == "*":
-                leaves = list(_leaves(args))
+                leaves = list(_leaves(args, keys=not strict))  # '*' takes positive operators only
                 quantifier = all if strict else any
                 if not (leaves and quantifier(cond.test(v, True, strict) for v in leaves)):
                     return False
             else:
-                value = _lookup(args, key)
-                if not cond.test(value, value is not _MISSING, strict):
+                found = _lookup(args, key)
+                if not found:
+                    ok = cond.test(None, False, strict)
+                elif strict:  # allow: every reading must pass
+                    ok = all(cond.test(v, True, True) for v in found)
+                else:  # deny and ask: any reading is enough
+                    ok = any(cond.test(v, True, False) for v in found)
+                if not ok:
                     return False
         return True
 

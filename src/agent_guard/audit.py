@@ -59,9 +59,12 @@ def _now() -> str:
 
 
 def _norm_key(key: str) -> str:
-    # "X-Api-Key", "x_api_key" and "xApiKey" all become "x_api_key"-like for matching.
-    key = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
     return key.lower().replace("-", "_")
+
+
+def _key_forms(key: str) -> tuple[str, str]:
+    # "passWord" is checked as "password" and as "pass_word"; "xApiKey" as "xapikey" and "x_api_key".
+    return _norm_key(key), _norm_key(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key))
 
 
 class Scrubber:
@@ -75,7 +78,7 @@ class Scrubber:
         self.max = max_value_chars
 
     def __call__(self, value: Any, key: str | None = None) -> Any:
-        if key is not None and self._rx is not None and self._rx.match(_norm_key(key)):
+        if key is not None and self._rx is not None and any(self._rx.match(k) for k in _key_forms(key)):
             return "[redacted]"
         if isinstance(value, str) and SECRET_VALUE.search(value):
             return "[redacted: looks like a secret]"

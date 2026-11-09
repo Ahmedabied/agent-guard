@@ -112,6 +112,8 @@ def test_scrubber_keys_and_secret_values():
     assert out["X-Api-Key"] == out["xApiKey"] == out["client-secret"] == out["auth_header"] == "[redacted]"
     assert out["note"].startswith("[redacted: looks") and out["cfg"].startswith("[redacted: looks")
     assert out["msg"] == "hello"
+    assert Scrubber()({"passWord": "x", "PASSWORD": "y", "userPassword": "z"}) == {
+        "passWord": "[redacted]", "PASSWORD": "[redacted]", "userPassword": "[redacted]"}
 
 
 def test_scrubber():

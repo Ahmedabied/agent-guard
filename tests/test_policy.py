@@ -160,7 +160,8 @@ rules:
   - {name: no-force, tool: push, args: {opts.force: true}, decision: deny}
 """)
     assert p.evaluate("push", {"opts.force": False, "opts": {"force": True}}).action == "deny"
-    assert p.evaluate("push", {"opts.force": True}).action == "allow"  # not the nested path
+    assert p.evaluate("push", {"opts.force": True, "opts": {"force": False}}).action == "deny"
+    assert p.evaluate("push", {"opts": {"force": False}}).action == "allow"
 
 
 def test_lists_and_maps_are_checked_per_value():
@@ -178,6 +179,7 @@ rules:
     assert p.evaluate("read", {"path": ["/data/a", "/data/b"]}).action == "allow"
     assert p.evaluate("read", {"path": ["/data/a", "/tmp/b"]}).action == "deny"
     assert p.evaluate("read", {"path": []}).action == "deny"
+    assert p.evaluate("read", {"path": {"/etc/shadow": 1}}).rule == "no-etc"  # keys count for deny rules
     assert p.evaluate("sh", {"cmd": "ls -la"}).action == "allow"
     assert p.evaluate("sh", {"cmd": "rm -rf /", "note": "ls"}).action == "deny"
     assert p.evaluate("sh", {}).action == "deny"
@@ -191,3 +193,14 @@ rules:
 """)
     assert p.evaluate("read", {"path": "a.txt"}).action == "allow"
     assert p.evaluate("read", {}).action == "deny"
+
+
+def test_deny_not_rule_fails_closed_on_empty_container():
+    p = Policy.from_yaml("""
+default: allow
+rules:
+  - {name: sandbox, tool: rm, args: {path: {not_under: /sandbox}}, decision: deny}
+""")
+    assert p.evaluate("rm", {"path": []}).action == "deny"
+    assert p.evaluate("rm", {"path": ["/sandbox/a"]}).action == "allow"
+    assert p.evaluate("rm", {"path": ["/sandbox/a", "/etc"]}).action == "deny"
