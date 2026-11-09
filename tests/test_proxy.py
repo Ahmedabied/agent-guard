@@ -353,14 +353,18 @@ def test_a_path_allow_rule_without_a_scheme_only_allows_local_files(tmp_path):
 def test_deny_rules_see_every_reading_of_a_uri(tmp_path):
     policy = "default: allow\nguard_resources: true\nrules:\n" \
              '  - {name: no-secret, tool: "resources/read", args: {path: {glob: "*secret*"}}, decision: deny}\n' \
-             '  - {name: no-evil, tool: "resources/read", args: {host: evil.example}, decision: deny}\n'
+             '  - {name: no-evil, tool: "resources/read", args: {host: evil.example}, decision: deny}\n' \
+             '  - {name: no-bad-host, tool: "resources/read", args: {host: {equals: bad.example}}, decision: deny}\n' \
+             '  - {name: no-key, tool: "resources/read", args: {path: {equals: /keys/main}}, decision: deny}\n'
     s = _open(tmp_path, policy)
     try:
         for uri in ("notes://x/%73ecret/a",            # percent-encoded in the path
                     "notes://%73ecret/a",              # or in the host part a server may read as a folder
                     "file:///data/%73ecret",
                     "https://EVIL.example/a",          # host compared as written and normalised
-                    "https://someone@evil.example:443/a"):
+                    "https://someone@evil.example:443/a",
+                    "https://BAD.example/a",            # equals sees each reading on its own
+                    "notes://x/keys/%6dain"):
             r = s.request("resources/read", {"uri": uri})
             assert r.get("error", {}).get("code") == -32001, (uri, r)
     finally:

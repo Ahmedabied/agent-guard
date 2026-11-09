@@ -145,18 +145,17 @@ rules are written to fail closed:
 
 **Resources.** An MCP server can expose files as resources, and a client reads them with `resources/read`, not a
 tool call, so a rule on `read_file` does not cover them. With `guard_resources: true` every read is judged like a
-call to a tool named `resources/read` with the arguments `uri`, `scheme`, `host` and `path`, each holding every
-reading a server might take (a deny rule matches if any reading does, an allow rule must pass them all). For a
-local `file://` uri, `path` is the decoded path, so `under:` sees through `..` and `%2e%2e`. For any other scheme,
-`path` is the decoded path, the decoded host and path together, and the raw uri; the raw uri cannot be placed in a
-folder, so `under:` deny rules always catch another scheme and `under:` allow rules never pass one: allow those by
-`scheme` or `uri` (rules on `uri` see it as sent, percent-encoding included). `host` is the host as written and
-lowercased without user or port. Refused before any
-rule: a uri that does not parse or has no scheme, and a `file://` uri naming another host, port or user (servers
-tend to read the path and ignore the host, so a rule would judge a different file). A blocked read is answered
-with a JSON-RPC error. It is off by default only so an existing
-policy does not start refusing reads: with `default: deny`, turning it on refuses every read until a rule allows
-it, for example:
+call to a tool named `resources/read` with the arguments `uri`, `scheme`, `host` and `path`, once for every reading
+a server might take: the read is denied if any reading is denied and allowed only if all are. For a local `file://`
+uri, `path` is the decoded path, so `under:` sees through `..` and `%2e%2e`. For any other scheme, `path` is the
+decoded path, the decoded host and path together, and the raw uri; the raw uri cannot be placed in a folder, so
+`under:` deny rules always catch another scheme and `under:` allow rules never pass one: allow those by `scheme` or
+`uri` (rules on `uri` see it as sent, percent-encoding included). `host` is the host as written and lowercased
+without user or port. Refused before any rule: a uri that does not parse or has no scheme, and a `file://` uri
+naming another host, port or user (servers tend to read the path and ignore the host, so a rule would judge a
+different file). A blocked read is answered with a JSON-RPC error. It is off by default only so an existing policy
+does not start refusing reads: with `default: deny`, turning it on refuses every read until a rule allows it, for
+example:
 
 ```yaml
   - {name: read-notes, tool: "resources/read", args: {scheme: file, path: {under: /data/notes}}, decision: allow}

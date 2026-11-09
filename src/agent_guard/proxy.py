@@ -46,21 +46,16 @@ def _key(msg_id: Any) -> str:
 RESOURCE_READ = "resources/read"
 
 
-def _readings(*values: str) -> str | list[str]:
-    """One value, or every distinct reading as a list: a deny rule matches if any matches, an allow rule needs all."""
-    out = list(dict.fromkeys(values))
-    return out[0] if len(out) == 1 else out
+def resource_readings(uri: str) -> tuple[list[dict] | None, str]:
+    """What a rule sees for resources/read: arguments uri, scheme, host and path, once for every reading a server
+    might take. The read is judged once per reading: denied if any reading is denied, allowed only if all are.
 
-
-def resource_args(uri: str) -> tuple[dict | None, str]:
-    """What a rule sees for resources/read: uri, scheme, host and path, each as every reading a server might take.
-
-    A local file:// uri: path is the decoded path, so `under:` sees through `..` and `%2e%2e`. Any other scheme: path
-    is the decoded path, the decoded host and path together (some servers read the host as a folder), and the raw
-    uri. The raw uri cannot be placed in a folder, so `under:` deny rules always match another scheme and `under:`
-    allow rules never pass one (allow those by `scheme` or `uri`). host is the raw netloc and the lowercased host
-    name. Refused before any rule (args None, and why): a uri that does not parse or has no scheme, and a file://
-    uri naming another host, port or user."""
+    A local file:// uri has one reading: the decoded path, so `under:` sees through `..` and `%2e%2e`. Any other
+    scheme: path is the decoded path, the decoded host and path together (some servers read the host as a folder),
+    and the raw uri, which cannot be placed in a folder, so an `under:` deny rule always catches another scheme and
+    an `under:` allow rule never passes one (allow those by `scheme` or `uri`); host is as written and lowercased
+    without user or port. Refused before any rule (None, and why): a uri that does not parse or has no scheme, and a
+    file:// uri naming another host, port or user."""
     try:
         u = urlsplit(uri)
         hostname = u.hostname or ""
@@ -72,10 +67,10 @@ def resource_args(uri: str) -> tuple[dict | None, str]:
     if scheme == "file":
         if u.netloc.lower() not in ("", "localhost"):
             return None, f"a file:// uri naming another host ({u.netloc}) is refused"
-        path = unquote(u.path)
-    else:
-        path = _readings(unquote(u.path), unquote(u.netloc + u.path), uri)
-    return {"uri": uri, "scheme": scheme, "host": _readings(u.netloc, hostname), "path": path}, ""
+        return [{"uri": uri, "scheme": scheme, "host": "", "path": unquote(u.path)}], ""
+    paths = dict.fromkeys((unquote(u.path), unquote(u.netloc + u.path), uri))
+    hosts = dict.fromkeys((u.netloc, hostname))
+    return [{"uri": uri, "scheme": scheme, "host": h, "path": p} for p in paths for h in hosts], ""
 
 
 def _line(obj: Any) -> bytes:
@@ -327,8 +322,10 @@ class Proxy:
         if msg.get("method") == RESOURCE_READ:
             uri = params.get("uri") if isinstance(params, dict) else None
             name = RESOURCE_READ
-            args, bad = resource_args(uri) if isinstance(uri, str) else (None, "resources/read needs a string uri")
+            readings, bad = resource_readings(uri) if isinstance(uri, str) else (None, "resources/read needs a string uri")
+            args = readings[0] if readings else None
         else:
+            readings = None
             name = params.get("name") if isinstance(params, dict) else None
             args = params.get("arguments") if isinstance(params, dict) else None
             bad = "" if isinstance(name, str) and (args is None or isinstance(args, dict)) else \
@@ -341,11 +338,13 @@ class Proxy:
                 self._to_client(_line({"jsonrpc": "2.0", "id": msg_id, "error": {
                     "code": -32602, "message": f"agent-guard: {bad}"}}))
             return False
-        decision = self.policy.evaluate(name, args)
+        decision = self._judge(name, readings) if readings else self.policy.evaluate(name, args)
         eval_us = (time.perf_counter_ns() - t0) // 1000
-        logged = self._log({"event": "call", "id": msg_id, "tool": name, "args": self.scrub(args or {}),
-                            "decision": decision.action, "rule": decision.rule, "reason": decision.reason,
-                            "eval_us": eval_us})
+        entry = {"event": "call", "id": msg_id, "tool": name, "args": self.scrub(args or {}),
+                 "decision": decision.action, "rule": decision.rule, "reason": decision.reason, "eval_us": eval_us}
+        if readings and len(readings) > 1:
+            entry["readings"] = len(readings)
+        logged = self._log(entry)
         if not logged:  # no audit trail, no tool call
             decision = Decision("deny", "audit-unavailable", "the audit log could not be written")
         if decision.action == "allow":
@@ -361,6 +360,17 @@ class Proxy:
         self.stats["asked"] += 1
         threading.Thread(target=self._ask, args=(msg, name, args, decision), daemon=True).start()
         return False
+
+    def _judge(self, name: str, readings: list[dict]) -> Decision:
+        """One decision for several readings of the same request: any deny wins, then any ask; allow needs them all.
+        Judged without charging rate rules, then an allow is charged once."""
+        decisions = [self.policy.evaluate(name, r, charge=False) for r in readings]
+        for action in ("deny", "ask"):
+            for d in decisions:
+                if d.action == action:
+                    return d
+        self.policy.charge(decisions[0])
+        return decisions[0]
 
     def _track(self, msg_id: Any, has_id: bool, name: str) -> None:
         if has_id:
