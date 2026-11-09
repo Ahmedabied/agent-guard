@@ -7,249 +7,35 @@ server: the client gets a normal tool result with isError set and the reason, so
 read it and change course instead of crashing.
 
 MCP over stdio is newline-delimited JSON-RPC, so this needs no MCP SDK and does not care which
-protocol version the two ends agree on.
+protocol version the two ends agree on. The decisions themselves live in judge.py.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import select
 import subprocess
 import sys
 import threading
 import time
-from dataclasses import replace
-from typing import Any, Callable
-from urllib.parse import unquote, urlsplit
+from typing import Any
 
-from .audit import AuditError, AuditLog, Scrubber
-from .policy import Decision, Policy
-
-Approver = Callable[[str, Any, Decision], "tuple[bool, str]"]
-
-
-VERSION_META = "io.modelcontextprotocol/protocolVersion"
-RESULT_TYPE_SINCE = "2026-07-28"  # from this version on, every result must carry resultType
-
-
-def _wants_result_type(params: Any) -> bool:
-    # 2026-07-28 sessions have no initialize; each request names its version in _meta.
-    meta = params.get("_meta") if isinstance(params, dict) else None
-    version = meta.get(VERSION_META) if isinstance(meta, dict) else None
-    return isinstance(version, str) and version >= RESULT_TYPE_SINCE
-
-
-def _key(msg_id: Any) -> str:
-    return json.dumps(msg_id, sort_keys=True)
-
-
-RESOURCE_READ = "resources/read"
-
-
-def resource_readings(uri: str) -> tuple[list[dict] | None, str]:
-    """What a rule sees for resources/read: arguments uri, scheme, host and path, once for every reading a server
-    might take. The read is judged once per reading: denied if any reading is denied, allowed only if all are.
-
-    A local file:// uri has one reading: the decoded path, so `under:` sees through `..` and `%2e%2e`. Any other
-    scheme: path is the decoded path, the decoded host and path together (some servers read the host as a folder),
-    and the raw uri, which cannot be placed in a folder, so an `under:` deny rule always catches another scheme and
-    an `under:` allow rule never passes one (allow those by `scheme` or `uri`); host is as written and lowercased
-    without user or port. Refused before any rule (None, and why): a uri that does not parse or has no scheme, and a
-    file:// uri naming another host, port or user."""
-    try:
-        u = urlsplit(uri)
-        hostname = u.hostname or ""
-    except ValueError:
-        return None, "resources/read needs a uri that parses"
-    scheme = u.scheme.lower()
-    if not scheme:
-        return None, "resources/read needs an absolute uri, with a scheme"
-    if scheme == "file":
-        if u.netloc.lower() not in ("", "localhost"):
-            return None, f"a file:// uri naming another host ({u.netloc}) is refused"
-        return [{"uri": uri, "scheme": scheme, "host": "", "path": unquote(u.path)}], ""
-    paths = dict.fromkeys((unquote(u.path), unquote(u.netloc + u.path), uri))
-    hosts = dict.fromkeys((u.netloc, hostname))
-    return [{"uri": uri, "scheme": scheme, "host": h, "path": p} for p in paths for h in hosts], ""
-
-
-def _line(obj: Any) -> bytes:
-    try:
-        return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
-    except UnicodeEncodeError:  # lone surrogates: escape everything instead
-        return json.dumps(obj, separators=(",", ":")).encode("ascii") + b"\n"
-
-
-def _no_duplicate_keys(pairs: list) -> dict:
-    out: dict = {}
-    for k, v in pairs:
-        if k in out:
-            raise ValueError(f"duplicate key {k!r}")
-        out[k] = v
-    return out
-
-
-def _no_constants(name: str) -> Any:
-    raise ValueError(f"{name} is not valid JSON")
-
-
-_STRICT = json.JSONDecoder(object_pairs_hook=_no_duplicate_keys, parse_constant=_no_constants)
-
-
-def parse_strict(raw: bytes) -> Any:
-    """Parse one client message the strict way. Duplicate keys, NaN and bad UTF-8 are refused,
-    because two parsers that disagree on them would let the server run a call the policy never
-    saw (for example {"name": "read_file", "name": "delete_file"})."""
-    return _STRICT.decode(raw.decode("utf-8"))
-
-
-def recover_id(raw: bytes) -> Any:
-    """The top-level id of a message parse_strict refused, or None when it cannot be told for sure.
-
-    A message nested deeper than this Python's JSON parser can follow (about 1,000 levels on 3.10, about 100,000 on
-    3.12 and later) or one with a duplicate key is refused, but the client is still waiting for an answer to its
-    id. This reads the text flat, one character at a time with no recursion, and returns the id only when the
-    top level is an object with exactly one "id" key holding a string or an integer."""
-    text = raw.decode("utf-8", errors="replace")
-    n = len(text)
-
-    def skip_space(k: int) -> int:
-        while k < n and text[k] in " \t\r\n":
-            k += 1
-        return k
-
-    def string_end(k: int) -> int:  # k is on the opening quote; returns the index after the closing one, or -1
-        k += 1
-        while k < n and text[k] != '"':
-            k += 2 if text[k] == "\\" else 1
-        return k + 1 if k < n else -1
-
-    i = skip_space(0)
-    if i >= n or text[i] != "{":
-        return None
-    depth, found, expect_key = 0, [], False
-    while i < n:
-        c = text[i]
-        if c == '"':
-            j = string_end(i)
-            if j < 0:
-                return None
-            if depth == 1 and expect_key:
-                try:
-                    key = json.loads(text[i:j])
-                except ValueError:
-                    return None
-                if key == "id":
-                    k = skip_space(j)
-                    if k >= n or text[k] != ":":
-                        return None
-                    k = skip_space(k + 1)
-                    if k < n and text[k] == '"':
-                        end = string_end(k)
-                        if end < 0:
-                            return None
-                    else:
-                        end = k
-                        while end < n and text[end] in "-+.eE0123456789":
-                            end += 1
-                    try:
-                        value = json.loads(text[k:end])
-                    except ValueError:
-                        return None
-                    if isinstance(value, bool) or not isinstance(value, (str, int)):
-                        return None
-                    after = skip_space(end)
-                    if after >= n or text[after] not in ",}":
-                        return None
-                    found.append(value)
-                    j = end
-            expect_key = False
-            i = j
-            continue
-        if c in "{[":
-            depth += 1
-            expect_key = c == "{" and depth == 1
-        elif c in "}]":
-            depth -= 1
-            if depth == 0:
-                break
-        elif c == "," and depth == 1:
-            expect_key = True
-        i += 1
-    return found[0] if len(found) == 1 else None
-
-
-class DenyApprover:
-    def __call__(self, tool: str, args: Any, decision: Decision) -> tuple[bool, str]:
-        return False, "nobody to ask (ask.via is deny)"
-
-
-class TtyApprover:
-    """Asks on the terminal the proxy was started from. MCP clients usually start servers
-    without a terminal; then every ask is denied, which is the safe answer."""
-
-    def __init__(self, timeout: float = 60, max_chars: int = 4000):
-        self.timeout = timeout
-        self.max_chars = max_chars
-        self._lock = threading.Lock()
-
-    def __call__(self, tool: str, args: Any, decision: Decision) -> tuple[bool, str]:
-        with self._lock:
-            try:
-                fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
-            except OSError:
-                return False, "no terminal to ask on"
-            with os.fdopen(fd, "r+b", buffering=0) as tty:
-                # ASCII only: control and bidi characters cannot disguise what is being approved.
-                shown = json.dumps(args, ensure_ascii=True, indent=2, sort_keys=True)
-                name = json.dumps(tool, ensure_ascii=True)
-                if len(shown) > self.max_chars:
-                    tty.write(f"\nagent-guard: denied {name}: arguments too long to show ({len(shown)} chars)\n".encode())
-                    return False, f"arguments too long to show for approval ({len(shown)} chars)"
-                tty.write(f"\nagent-guard: {name} with arguments\n{shown}\n  rule {decision.rule}: "
-                          f"{decision.reason}\n  allow this call? [y/N] ".encode("ascii", "backslashreplace"))
-                ready, _, _ = select.select([tty], [], [], self.timeout)
-                if not ready:
-                    tty.write(b"\n  no answer, denied\n")
-                    return False, f"no answer on the terminal in {self.timeout:g}s"
-                answer = tty.readline().strip().lower()
-                if answer in (b"y", b"yes"):
-                    return True, "approved on the terminal"
-                return False, "refused on the terminal"
-
-
-class CommandApprover:
-    """Runs a command with the call as JSON on stdin. Exit code 0 approves."""
-
-    def __init__(self, command: list[str], timeout: float = 60):
-        self.command = command
-        self.timeout = timeout
-
-    def __call__(self, tool: str, args: Any, decision: Decision) -> tuple[bool, str]:
-        payload = json.dumps({"tool": tool, "arguments": args, "rule": decision.rule, "reason": decision.reason})
-        try:
-            r = subprocess.run(self.command, input=payload.encode(), capture_output=True, timeout=self.timeout)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            return False, f"approver command failed: {e.__class__.__name__}"
-        return (r.returncode == 0), f"approver command exit {r.returncode}"
-
-
-def make_approver(cfg: dict) -> Approver:
-    via = cfg.get("via", "tty")
-    timeout = float(cfg.get("timeout", 60))
-    if via == "deny":
-        return DenyApprover()
-    if via == "command":
-        cmd = cfg.get("command")
-        if isinstance(cmd, str):
-            cmd = [cmd]
-        if not cmd or not all(isinstance(c, str) for c in cmd):
-            raise ValueError("ask.command must be a command line (a list of strings)")
-        return CommandApprover(cmd, timeout)
-    if via == "tty":
-        return TtyApprover(timeout)
-    raise ValueError(f"ask.via must be tty, command or deny, got {via!r}")
+from .audit import AuditLog, Scrubber
+from .judge import (  # noqa: F401  re-exported: older imports name them from here
+    RESOURCE_READ,
+    Approver,
+    CommandApprover,
+    DenyApprover,
+    Judge,
+    TtyApprover,
+    Verdict,
+    _key,
+    _line,
+    make_approver,
+    parse_strict,
+    recover_id,
+    resource_readings,
+)
+from .policy import Policy
 
 
 class Proxy:
@@ -266,12 +52,10 @@ class Proxy:
     ):
         self.policy = policy
         self.command = command
-        self.audit = audit
-        self.scrub = scrub or Scrubber()
-        self.approver = approver or make_approver(policy.ask)
+        self.quiet = quiet
+        self.judge = Judge(policy, audit, scrub, approver, say=self._say)
         self.client_in = client_in or sys.stdin.buffer
         self.client_out = client_out or sys.stdout.buffer
-        self.quiet = quiet
         self.proc: subprocess.Popen | None = None
         self._out_lock = threading.Lock()
         self._srv_lock = threading.Lock()
@@ -280,7 +64,10 @@ class Proxy:
         self._list_ids: set[str] = set()
         self._done = threading.Event()
         self.internal_errors = 0
-        self.stats = {"allowed": 0, "denied": 0, "asked": 0}
+
+    @property
+    def stats(self) -> dict:
+        return self.judge.stats
 
     # ---- plumbing -------------------------------------------------------------------------
 
@@ -304,16 +91,6 @@ class Proxy:
         if not self.quiet:
             print(f"agent-guard: {text}", file=sys.stderr, flush=True)
 
-    def _log(self, record: dict) -> bool:
-        if self.audit is None:
-            return True
-        try:
-            self.audit.append(record)
-            return True
-        except Exception as e:  # noqa: BLE001  any failure to log means the call is denied
-            self._say(f"audit log write failed: {type(e).__name__}: {e}"[:300])
-            return False
-
     # ---- client to server -----------------------------------------------------------------
 
     def _pump_client(self) -> None:
@@ -328,7 +105,7 @@ class Proxy:
                     # for an answer that never comes (JSON-RPC uses null only when the id cannot be told).
                     why = "nested too deep to judge" if isinstance(e, RecursionError) else f"{e}"
                     msg_id = recover_id(raw)
-                    self._log({"event": "rejected", "id": msg_id, "reason": f"unparseable client message: {why}"[:300]})
+                    self.judge.log({"event": "rejected", "id": msg_id, "reason": f"unparseable client message: {why}"[:300]})
                     self._to_client(_line({"jsonrpc": "2.0", "id": msg_id, "error": {
                         "code": -32700, "message": f"agent-guard: parse error: {why}"[:300]}}))
                     continue
@@ -351,7 +128,7 @@ class Proxy:
         reason = f"internal error while judging: {type(err).__name__}"
         self._say(f"{reason}: {err}"[:300])
         try:
-            self._log({"event": "rejected", "reason": reason})
+            self.judge.log({"event": "rejected", "reason": reason})
         except Exception:  # noqa: BLE001
             pass
         items = msg if isinstance(msg, list) else [msg]
@@ -360,17 +137,11 @@ class Proxy:
         if replies:
             self._to_client(_line(replies if isinstance(msg, list) else replies[0]))
 
-    def _judged(self, msg: Any) -> bool:
-        if not isinstance(msg, dict):
-            return False
-        m = msg.get("method")
-        return m == "tools/call" or (m == RESOURCE_READ and self.policy.guard_resources)
-
     def _message(self, msg: dict) -> None:
         # Everything forwarded is re-serialised from the parsed message, so the server receives
         # exactly what the policy judged, byte for byte.
         method = msg.get("method")
-        if self._judged(msg):
+        if self.judge.judged(msg):
             if self._call(msg):
                 self._to_server(_line(msg))
         else:
@@ -382,7 +153,7 @@ class Proxy:
     def _batch(self, items: list) -> None:
         keep = []
         for item in items:
-            if self._judged(item):
+            if self.judge.judged(item):
                 if self._call(item):
                     keep.append(item)
             else:
@@ -396,99 +167,28 @@ class Proxy:
 
     def _call(self, msg: dict) -> bool:
         """Judge one tools/call (or resources/read). True means forward it now."""
-        t0 = time.perf_counter_ns()
-        msg_id = msg.get("id")
-        has_id = "id" in msg
-        params = msg.get("params")
-        if msg.get("method") == RESOURCE_READ:
-            uri = params.get("uri") if isinstance(params, dict) else None
-            name = RESOURCE_READ
-            readings, bad = resource_readings(uri) if isinstance(uri, str) else (None, "resources/read needs a string uri")
-            args = readings[0] if readings else None
-        else:
-            readings = None
-            name = params.get("name") if isinstance(params, dict) else None
-            args = params.get("arguments") if isinstance(params, dict) else None
-            bad = "" if isinstance(name, str) and (args is None or isinstance(args, dict)) else \
-                "tools/call needs a string name and object arguments"
-        if bad:
-            self._log({"event": "call", "id": msg_id, "tool": name if isinstance(name, str) else None,
-                       "decision": "deny", "rule": "malformed", "reason": bad})
-            self.stats["denied"] += 1
-            if has_id:
-                self._to_client(_line({"jsonrpc": "2.0", "id": msg_id, "error": {
-                    "code": -32602, "message": f"agent-guard: {bad}"}}))
-            return False
-        decision = self._judge(name, readings) if readings else self.policy.evaluate(name, args)
-        eval_us = (time.perf_counter_ns() - t0) // 1000
-        entry = {"event": "call", "id": msg_id, "tool": name, "args": self.scrub(args or {}),
-                 "decision": decision.action, "rule": decision.rule, "reason": decision.reason, "eval_us": eval_us}
-        if readings and len(readings) > 1:
-            entry["readings"] = len(readings)
-        logged = self._log(entry)
-        if not logged:  # no audit trail, no tool call
-            decision = Decision("deny", "audit-unavailable", "the audit log could not be written")
-        if decision.action == "allow":
-            self.stats["allowed"] += 1
-            self._track(msg_id, has_id, name)
+        verdict = self.judge.call(msg)
+        if verdict.action == "allow":
+            self._track(msg.get("id"), "id" in msg, verdict.name)
             return True
-        if decision.action == "deny":
-            self.stats["denied"] += 1
-            self._say(f"denied {name} (rule {decision.rule}): {decision.reason}")
-            if has_id:
-                self._blocked(msg, name, decision.rule, decision.reason)
-            return False
-        self.stats["asked"] += 1
-        threading.Thread(target=self._ask, args=(msg, name, args, decision), daemon=True).start()
+        if verdict.action == "ask":
+            threading.Thread(target=self._ask, args=(msg, verdict), daemon=True).start()
+        elif verdict.reply is not None:
+            self._to_client(_line(verdict.reply))
         return False
-
-    def _judge(self, name: str, readings: list[dict]) -> Decision:
-        """One decision for several readings of the same request: any deny wins, then any ask; allow needs them all.
-        Judged without charging rate rules, then an allow is charged once."""
-        decisions = [self.policy.evaluate(name, r, charge=False) for r in readings]
-        # Every rate rule any reading counted against, once each, so no reading can be used to skip a limit.
-        charge = tuple({id(rule): rule for d in decisions for rule in d.charge}.values())
-        for action in ("deny", "ask"):
-            for d in decisions:
-                if d.action == action:
-                    return replace(d, charge=charge)
-        allowed = replace(decisions[0], charge=charge)
-        self.policy.charge(allowed)
-        return allowed
 
     def _track(self, msg_id: Any, has_id: bool, name: str) -> None:
         if has_id:
             with self._state_lock:
                 self._pending[_key(msg_id)] = (msg_id, name, time.perf_counter_ns())
 
-    def _blocked(self, msg: dict, name: str, rule: str, reason: str) -> None:
-        if msg.get("method") == RESOURCE_READ:  # no tool result to carry it: a JSON-RPC error, like a missing resource
-            uri = (msg.get("params") or {}).get("uri")
-            self._to_client(_line({"jsonrpc": "2.0", "id": msg.get("id"), "error": {
-                "code": -32001, "message": f"agent-guard blocked reading {uri}: {reason} (rule: {rule})"}}))
-            return
-        text = f"agent-guard blocked this call to {name}: {reason} (rule: {rule})"
-        result: dict = {"content": [{"type": "text", "text": text}], "isError": True}
-        if _wants_result_type(msg.get("params")):
-            result["resultType"] = "complete"
-        self._to_client(_line({"jsonrpc": "2.0", "id": msg.get("id"), "result": result}))
-
-    def _ask(self, msg: dict, name: str, args: Any, decision: Decision) -> None:
-        try:
-            ok, how = self.approver(name, args, decision)
-        except Exception as e:  # an approver bug must not let a call through
-            ok, how = False, f"approver error: {e.__class__.__name__}"
-        msg_id = msg.get("id")
-        if not self._log({"event": "approval", "id": msg_id, "tool": name, "approved": ok, "how": how}):
-            ok, how = False, "the audit log could not be written"
-        if ok:
-            self.policy.charge(decision)
-            self._track(msg_id, "id" in msg, name)
+    def _ask(self, msg: dict, verdict: Verdict) -> None:
+        verdict = self.judge.ask(msg, verdict)
+        if verdict.action == "allow":
+            self._track(msg.get("id"), "id" in msg, verdict.name)
             self._to_server(_line(msg))
-        else:
-            self._say(f"denied {name} after ask: {how}")
-            if "id" in msg:
-                self._blocked(msg, name, decision.rule, f"needs approval and was not approved ({how})")
+        elif verdict.reply is not None:
+            self._to_client(_line(verdict.reply))
 
     # ---- server to client -----------------------------------------------------------------
 
@@ -500,10 +200,7 @@ class Proxy:
                     raw, done = self._inspect(raw)
                 self._to_client(raw)
                 for (msg_id, name, t0), item in done:  # logged after forwarding: off the hot path
-                    res = item.get("result")
-                    ok = "error" not in item and not (isinstance(res, dict) and res.get("isError") is True)
-                    us = (time.perf_counter_ns() - t0) // 1000
-                    self._log({"event": "result", "id": msg_id, "tool": name, "ok": ok, "us": us})
+                    self.judge.result(msg_id, name, t0, item)
         finally:
             self._fail_pending()
             self._done.set()
@@ -527,26 +224,17 @@ class Proxy:
             if entry is not None:
                 done.append((entry, item))
             elif is_list:
-                changed |= self._filter_tools(item)
+                changed |= self.judge.filter_tools(item)
         if changed:
             raw = _line(msg)
         return raw, done
-
-    def _filter_tools(self, item: dict) -> bool:
-        res = item.get("result")
-        if not isinstance(res, dict) or not isinstance(res.get("tools"), list):
-            return False
-        before = res["tools"]
-        res["tools"] = [t for t in before if not (isinstance(t, dict) and isinstance(t.get("name"), str)
-                                                   and self.policy.always_denied(t["name"]))]
-        return len(res["tools"]) != len(before)
 
     def _fail_pending(self) -> None:
         with self._state_lock:
             pending = list(self._pending.values())
             self._pending.clear()
         for msg_id, name, _ in pending:
-            self._log({"event": "result", "id": msg_id, "tool": name, "ok": False, "us": 0, "error": "server exited"})
+            self.judge.log({"event": "result", "id": msg_id, "tool": name, "ok": False, "us": 0, "error": "server exited"})
             self._to_client(_line({"jsonrpc": "2.0", "id": msg_id, "error": {
                 "code": -32603, "message": "agent-guard: the tool server exited before answering"}}))
 
