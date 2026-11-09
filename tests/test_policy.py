@@ -215,3 +215,13 @@ rules:
     assert p.evaluate("run", {"opts": {"mode": "safe"}}).action == "allow"
     assert p.evaluate("run", {"opts.mode": "safe"}).action == "deny"  # server would read opts.mode as missing
     assert p.evaluate("run", {"opts.mode": "safe", "opts": {"mode": "x"}}).action == "deny"
+
+
+def test_deny_rule_tests_missing_nested_reading_as_missing():
+    p = Policy.from_yaml("""
+default: allow
+rules:
+  - {name: sandbox, tool: rm, args: {opts.path: {not_under: /sandbox}}, decision: deny}
+""")
+    assert p.evaluate("rm", {"opts.path": "/sandbox/x"}).action == "deny"
+    assert p.evaluate("rm", {"opts": {"path": "/sandbox/x"}}).action == "allow"

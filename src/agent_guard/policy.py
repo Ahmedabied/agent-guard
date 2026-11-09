@@ -275,9 +275,8 @@ class Rule:
                 found = _lookup(args, key)
                 if strict:  # allow: every reading must exist and pass
                     ok = all(v is not _MISSING and cond.test(v, True, True) for v in found)
-                else:  # deny and ask: any reading is enough; nothing present is tested as missing
-                    present = [v for v in found if v is not _MISSING]
-                    ok = any(cond.test(v, True, False) for v in present) if present else cond.test(None, False)
+                else:  # deny and ask: any reading is enough, and a missing one is tested as missing
+                    ok = any(cond.test(v, v is not _MISSING, False) for v in found)
                 if not ok:
                     return False
         return True
