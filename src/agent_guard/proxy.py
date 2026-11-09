@@ -104,6 +104,82 @@ def parse_strict(raw: bytes) -> Any:
     return _STRICT.decode(raw.decode("utf-8"))
 
 
+def recover_id(raw: bytes) -> Any:
+    """The top-level id of a message parse_strict refused, or None when it cannot be told for sure.
+
+    A message nested deeper than this Python's JSON parser can follow (about 1,000 levels on 3.10, about 100,000 on
+    3.12 and later) or one with a duplicate key is refused, but the client is still waiting for an answer to its
+    id. This reads the text flat, one character at a time with no recursion, and returns the id only when the
+    top level is an object with exactly one "id" key holding a string or an integer."""
+    text = raw.decode("utf-8", errors="replace")
+    n = len(text)
+
+    def skip_space(k: int) -> int:
+        while k < n and text[k] in " \t\r\n":
+            k += 1
+        return k
+
+    def string_end(k: int) -> int:  # k is on the opening quote; returns the index after the closing one, or -1
+        k += 1
+        while k < n and text[k] != '"':
+            k += 2 if text[k] == "\\" else 1
+        return k + 1 if k < n else -1
+
+    i = skip_space(0)
+    if i >= n or text[i] != "{":
+        return None
+    depth, found, expect_key = 0, [], False
+    while i < n:
+        c = text[i]
+        if c == '"':
+            j = string_end(i)
+            if j < 0:
+                return None
+            if depth == 1 and expect_key:
+                try:
+                    key = json.loads(text[i:j])
+                except ValueError:
+                    return None
+                if key == "id":
+                    k = skip_space(j)
+                    if k >= n or text[k] != ":":
+                        return None
+                    k = skip_space(k + 1)
+                    if k < n and text[k] == '"':
+                        end = string_end(k)
+                        if end < 0:
+                            return None
+                    else:
+                        end = k
+                        while end < n and text[end] in "-+.eE0123456789":
+                            end += 1
+                    try:
+                        value = json.loads(text[k:end])
+                    except ValueError:
+                        return None
+                    if isinstance(value, bool) or not isinstance(value, (str, int)):
+                        return None
+                    after = skip_space(end)
+                    if after >= n or text[after] not in ",}":
+                        return None
+                    found.append(value)
+                    j = end
+            expect_key = False
+            i = j
+            continue
+        if c in "{[":
+            depth += 1
+            expect_key = c == "{" and depth == 1
+        elif c in "}]":
+            depth -= 1
+            if depth == 0:
+                break
+        elif c == "," and depth == 1:
+            expect_key = True
+        i += 1
+    return found[0] if len(found) == 1 else None
+
+
 class DenyApprover:
     def __call__(self, tool: str, args: Any, decision: Decision) -> tuple[bool, str]:
         return False, "nobody to ask (ask.via is deny)"
@@ -248,9 +324,13 @@ class Proxy:
                 try:
                     msg = parse_strict(raw)
                 except (ValueError, RecursionError) as e:  # never forward what we could not judge
-                    self._log({"event": "rejected", "reason": f"unparseable client message: {e}"[:300]})
-                    self._to_client(_line({"jsonrpc": "2.0", "id": None, "error": {
-                        "code": -32700, "message": f"agent-guard: parse error: {e}"[:300]}}))
+                    # The client gets its own id back when it can be read for sure, so it is not left waiting
+                    # for an answer that never comes (JSON-RPC uses null only when the id cannot be told).
+                    why = "nested too deep to judge" if isinstance(e, RecursionError) else f"{e}"
+                    msg_id = recover_id(raw)
+                    self._log({"event": "rejected", "id": msg_id, "reason": f"unparseable client message: {why}"[:300]})
+                    self._to_client(_line({"jsonrpc": "2.0", "id": msg_id, "error": {
+                        "code": -32700, "message": f"agent-guard: parse error: {why}"[:300]}}))
                     continue
                 try:
                     if isinstance(msg, list):

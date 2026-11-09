@@ -10,7 +10,7 @@ import pytest
 
 from agent_guard.audit import AuditError, read_entries, verify
 from agent_guard.policy import Policy
-from agent_guard.proxy import Proxy, parse_strict
+from agent_guard.proxy import Proxy, parse_strict, recover_id
 
 HERE = Path(__file__).parent
 FILES_SERVER = str(HERE.parent / "examples" / "files_server.py")
@@ -149,14 +149,20 @@ def test_duplicate_keys_are_refused(s):
     s.send(raw)
     r = s.recv()
     assert r["error"]["code"] == -32700 and "duplicate" in r["error"]["message"]
+    assert r["id"] == 7  # the client still gets an answer for its own id
     assert (s.root / "notes" / "plan.md").exists()
 
 
 def test_unparseable_line_is_answered_not_forwarded(s):
     s.send(b'{"jsonrpc":"2.0","id":8,"method":"tools/call",')
-    assert s.recv()["error"]["code"] == -32700
+    r = s.recv()
+    assert r["error"]["code"] == -32700 and r["id"] == 8
     s.send(b'{"jsonrpc":"2.0","id":9,"method":"ping","params":{"x":NaN}}')
-    assert s.recv()["error"]["code"] == -32700
+    r = s.recv()
+    assert r["error"]["code"] == -32700 and r["id"] == 9
+    s.send(b"not json at all")
+    r = s.recv()
+    assert r["error"]["code"] == -32700 and r["id"] is None  # no id to be read: null, as JSON-RPC says
 
 
 def test_malformed_call(s):
@@ -254,19 +260,46 @@ def test_relative_path_cannot_slip_past_a_deny_rule(s):
     assert (s.root / "notes" / "plan.md").read_text() == "keep me"
 
 
-DEEP = b"[" * 5000 + b"0" + b"]" * 5000  # written by hand: json.dumps itself recurses too deep on some Pythons
+def _deep(levels):  # written by hand: json.dumps itself recurses too deep on some Pythons
+    return b"[" * levels + b"0" + b"]" * levels
 
 
-@pytest.mark.parametrize("args", [b'{"text": "\\ud800"}', b'{"text": ' + DEEP + b"}"], ids=["lone-surrogate", "deep-nesting"])
+@pytest.mark.parametrize("args", [
+    b'{"text": "\\ud800"}',
+    b'{"text": ' + _deep(5000) + b"}",  # past 3.10's parser, within 3.12's: then the judging gives up
+    b'{"text": ' + _deep(200_000) + b"}",  # past every Python's parser
+    b'{"text": "a", "text": "b"}',
+    b'{"text": NaN}',
+], ids=["lone-surrogate", "deep-5k", "deep-200k", "duplicate-key", "nan"])
 def test_a_message_the_guard_cannot_judge_is_denied_and_the_guard_keeps_serving(s, args):
     s.send(b'{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "echo", "arguments": ' + args + b"}}")
     r = s.recv()
-    # Denied either way: as a parse error (id null) where the JSON parser gives up first, as on Python 3.10,
-    # or as an error for id 7 where the parser copes and the judging fails.
-    assert ("error" in r and r["id"] in (7, None)) or (r["id"] == 7 and r["result"]["isError"] is True)
+    # Same answer on every Python: denied, for id 7, so the client is not left waiting. Where the parser gives up
+    # first (3.10 at 5k levels, every version at 200k) the id is read from the raw text.
+    assert r["id"] == 7
+    assert "error" in r or r["result"]["isError"] is True
     ok = s.call("echo", text="still here")
     assert ok["result"]["isError"] is False
     assert s.close() in (0, 70)
+
+
+@pytest.mark.parametrize("raw,want", [
+    (b'{"id": 7, "method": "x"}', 7),
+    (b'  {"method": "id", "params": {"id": 1, "x": [{"id": 2}]}, "id": "q-9"}', "q-9"),  # only the top level counts
+    (b'{"\\u0069d": 3, "a\\"id": 4}', 3),  # keys are decoded; an escaped quote does not end a string
+    (b'{"id": "a\\"b}", "x": ' + b"[" * 200_000, 'a"b}'),  # read before the deep part, which is never parsed
+    (b'{"id": 7, "id": 8}', None),  # two ids: no telling which one the client meant
+    (b'{"id": 7.5}', None),
+    (b'{"id": 7x}', None),
+    (b'{"id": true}', None),
+    (b'{"id": null}', None),
+    (b'{"id": {"a": 1}}', None),
+    (b'[{"id": 7}]', None),  # batches are answered per item elsewhere
+    (b'{"method": "x"}', None),
+    (b'{"id": "unterminated', None),
+])
+def test_recover_id_reads_only_a_clear_top_level_id(raw, want):
+    assert recover_id(raw) == want
 
 
 RESOURCE_POLICY = POLICY.replace("hide_denied_tools: true\n", "hide_denied_tools: true\nguard_resources: true\n") + \

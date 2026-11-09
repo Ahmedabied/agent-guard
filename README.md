@@ -229,7 +229,10 @@ at most the result lines of calls still in flight; a power cut can lose the last
   `verify` will say ok. Deleting the file or cutting lines from the end is the same. The chain catches accidents
   and careless edits; against a writer who means it, keep the head hash (`--expect-head`) on another machine.
 - **A message the guard fails to judge is denied**, answered with an error and logged, and the guard keeps
-  serving. It then exits with code 70 so the failure is not silent.
+  serving. It then exits with code 70 so the failure is not silent. The error carries the request's own id even
+  when the JSON parser gives up (nesting past about 1,000 levels on Python 3.10, 100,000 on 3.12 and later): the
+  id is read from the raw text without recursion, so the client gets the same answer on every Python instead of
+  waiting. Only when no single top-level id can be read is the id null.
 - **Old-style JSON-RPC batches** (2025-03-26) are split: denied calls in a batch are answered one by one.
 - File locking for several writers on one log is Unix only.
 
@@ -237,7 +240,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk]'
-pytest -q                      # 85 tests
+pytest -q                      # 102 tests
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on
