@@ -65,8 +65,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--calls", type=int, default=2000)
     ap.add_argument("--fsync", action="store_true", help="fsync the audit log after every entry")
+    ap.add_argument("--dir", help="where to put the audit log (use a real disk with --fsync; /tmp is often tmpfs)")
     a = ap.parse_args()
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(dir=a.dir) as tmp:
         demo = Path(tmp) / "root"
         demo.mkdir()
         policy = POLICY
@@ -81,7 +82,7 @@ def main():
     p50d, p50g = statistics.median(direct), statistics.median(guarded)
     p99d, p99g = pct(direct, 0.99), pct(guarded, 0.99)
     print(f"{a.calls} sequential tools/call round trips per run, python {sys.version.split()[0]}, "
-          f"audit fsync {'on' if a.fsync else 'off'}, {os.cpu_count()} cpus")
+          f"audit fsync {'on' if a.fsync else 'off'}, {os.cpu_count()} cpus, load {os.getloadavg()[0]:.1f}")
     print(f"{'':10}{'median':>12}{'p99':>12}")
     print(f"{'direct':10}{p50d:>10.0f}us{p99d:>10.0f}us")
     print(f"{'guarded':10}{p50g:>10.0f}us{p99g:>10.0f}us")
