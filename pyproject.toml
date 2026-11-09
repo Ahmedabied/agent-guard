@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-guard"
+version = "0.1.0"
+description = "Guardrails as code for AI agents: a policy proxy in front of MCP tool servers, with a hash-chained audit log."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Ahmed Abied" }]
+requires-python = ">=3.10"
+dependencies = ["pyyaml>=6"]
+keywords = ["mcp", "ai-agents", "guardrails", "policy", "audit-log", "security"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Security",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+sdk = ["mcp>=2"]
+
+[project.scripts]
+agent-guard = "agent_guard.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Ahmedabied/agent-guard"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_guard"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
