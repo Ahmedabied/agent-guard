@@ -47,19 +47,26 @@ RESOURCE_READ = "resources/read"
 
 
 def resource_args(uri: str) -> tuple[dict | None, str]:
-    """What a rule sees for resources/read: uri, scheme, host and the decoded path, for every scheme, because servers
-    read the path and ignore the rest; a deny rule on path must see the same path whatever wraps it. `under:` then
-    sees through `..` and `%2e%2e`. Refused before any rule (args None, and why): a uri that does not parse, and a
-    file:// uri naming another host, whose path would not mean what a rule thinks it means."""
+    """What a rule sees for resources/read: uri, scheme, host (the raw netloc) and path. Fails closed both ways.
+
+    A local file:// uri gets its decoded path, so `under:` sees through `..` and `%2e%2e`. Any other scheme gets the
+    raw uri as its path: not a filesystem path, so it cannot be placed, which makes path deny rules match it and path
+    allow rules never pass it (allow those by `scheme` or `uri`). Refused before any rule (args None, and why): a uri
+    that does not parse or has no scheme, and a file:// uri naming another host, port or user."""
     try:
         u = urlsplit(uri)
-        host = u.hostname or ""
     except ValueError:
         return None, "resources/read needs a uri that parses"
     scheme = u.scheme.lower()
-    if scheme == "file" and host not in ("", "localhost"):
-        return None, f"a file:// uri naming another host ({host}) is refused"
-    return {"uri": uri, "scheme": scheme, "host": host, "path": unquote(u.path)}, ""
+    if not scheme:
+        return None, "resources/read needs an absolute uri, with a scheme"
+    if scheme == "file":
+        if u.netloc.lower() not in ("", "localhost"):
+            return None, f"a file:// uri naming another host ({u.netloc}) is refused"
+        path = unquote(u.path)
+    else:
+        path = uri
+    return {"uri": uri, "scheme": scheme, "host": u.netloc, "path": path}, ""
 
 
 def _line(obj: Any) -> bytes:

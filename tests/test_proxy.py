@@ -326,10 +326,25 @@ def test_a_deny_rule_on_path_cannot_be_dodged_by_host_or_scheme(tmp_path):
     try:
         assert s.request("resources/read", {"uri": "file://" + s.path("notes/plan.md")})["result"]
         for uri in ("file://elsewhere" + s.path("scratch/old.txt"),     # refused outright: another host
-                    "notes://x" + s.path("scratch/old.txt"),             # any scheme: the path is still judged
+                    "file://localhost:22" + s.path("scratch/old.txt"),   # or a port
+                    "notes://x" + s.path("scratch/old.txt"),             # another scheme: its path cannot be placed
+                    "notes:///public/readme",                            # so path deny rules catch every one of them
                     "FILE://" + s.path("scratch/old.txt"),
+                    s.path("scratch/old.txt"),                           # no scheme: refused
                     "file://[::1" + s.path("scratch/old.txt")):          # does not parse: refused
             r = s.request("resources/read", {"uri": uri})
             assert "error" in r and "agent-guard" in r["error"]["message"], (uri, r)
+    finally:
+        s.close()
+
+
+def test_a_path_allow_rule_without_a_scheme_only_allows_local_files(tmp_path):
+    policy = "default: deny\nguard_resources: true\nrules:\n" \
+             '  - {name: notes, tool: "resources/read", args: {path: {under: ROOT/notes}}, decision: allow}\n'
+    s = _open(tmp_path, policy)
+    try:
+        assert s.request("resources/read", {"uri": "file://" + s.path("notes/plan.md")})["result"]
+        for uri in ("notes://" + s.path("notes/plan.md"), "https://example.com" + s.path("notes/plan.md")):
+            assert s.request("resources/read", {"uri": uri})["error"]["code"] == -32001, uri
     finally:
         s.close()
