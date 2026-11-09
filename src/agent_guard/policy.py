@@ -176,23 +176,29 @@ def _check(op: str, arg: Any, value: Any) -> bool:
     return arg.search(text) is None  # not_regex
 
 
+_MISSING = object()
+
+
 def _lookup(args: Any, key: str) -> list:
     """Every value the key could mean. A plain key reads one argument. A dotted key
     ("opts.force", "files.0") could mean a nested path or a literal key with dots in it, so
-    both readings are returned and the rule checks them all."""
+    both readings come back. The nested reading is always in the list (as _MISSING when it is
+    absent), so an allow rule cannot be satisfied by a literal key alone."""
     if not isinstance(args, dict):
-        return []
+        return [_MISSING]
+    if "." not in key:
+        return [args.get(key, _MISSING)]
     found = [args[key]] if key in args else []
-    if "." in key:
-        cur: Any = args
-        for part in key.split("."):
-            if isinstance(cur, dict) and part in cur:
-                cur = cur[part]
-            elif isinstance(cur, list) and part.isdigit() and int(part) < len(cur):
-                cur = cur[int(part)]
-            else:
-                return found
-        found.append(cur)
+    cur: Any = args
+    for part in key.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        elif isinstance(cur, list) and part.isdigit() and int(part) < len(cur):
+            cur = cur[int(part)]
+        else:
+            cur = _MISSING
+            break
+    found.append(cur)
     return found
 
 
@@ -267,12 +273,11 @@ class Rule:
                     return False
             else:
                 found = _lookup(args, key)
-                if not found:
-                    ok = cond.test(None, False, strict)
-                elif strict:  # allow: every reading must pass
-                    ok = all(cond.test(v, True, True) for v in found)
-                else:  # deny and ask: any reading is enough
-                    ok = any(cond.test(v, True, False) for v in found)
+                if strict:  # allow: every reading must exist and pass
+                    ok = all(v is not _MISSING and cond.test(v, True, True) for v in found)
+                else:  # deny and ask: any reading is enough; nothing present is tested as missing
+                    present = [v for v in found if v is not _MISSING]
+                    ok = any(cond.test(v, True, False) for v in present) if present else cond.test(None, False)
                 if not ok:
                     return False
         return True

@@ -204,3 +204,14 @@ rules:
     assert p.evaluate("rm", {"path": []}).action == "deny"
     assert p.evaluate("rm", {"path": ["/sandbox/a"]}).action == "allow"
     assert p.evaluate("rm", {"path": ["/sandbox/a", "/etc"]}).action == "deny"
+
+
+def test_allow_rule_needs_the_nested_reading():
+    p = Policy.from_yaml("""
+default: deny
+rules:
+  - {name: safe-mode, tool: run, args: {opts.mode: safe}, decision: allow}
+""")
+    assert p.evaluate("run", {"opts": {"mode": "safe"}}).action == "allow"
+    assert p.evaluate("run", {"opts.mode": "safe"}).action == "deny"  # server would read opts.mode as missing
+    assert p.evaluate("run", {"opts.mode": "safe", "opts": {"mode": "x"}}).action == "deny"
