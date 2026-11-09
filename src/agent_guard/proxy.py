@@ -2,7 +2,7 @@
 
 The client (the agent's host app) talks to the proxy on stdin and stdout. The proxy starts the
 real server as a child process and copies every message both ways untouched, except
-"tools/call" requests, which go through the policy first. A denied call never reaches the
+"tools/call" requests (and "resources/read" with guard_resources: true), which go through the policy first. A denied call never reaches the
 server: the client gets a normal tool result with isError set and the reason, so the agent can
 read it and change course instead of crashing.
 
@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 from typing import Any, Callable
+from urllib.parse import unquote, urlsplit
 
 from .audit import AuditError, AuditLog, Scrubber
 from .policy import Decision, Policy
@@ -40,6 +41,19 @@ def _wants_result_type(params: Any) -> bool:
 
 def _key(msg_id: Any) -> str:
     return json.dumps(msg_id, sort_keys=True)
+
+
+RESOURCE_READ = "resources/read"
+
+
+def resource_args(uri: str) -> dict:
+    """What a rule sees for resources/read: the uri, and for a local file:// uri its decoded path, so `under:` works
+    on it (%2e%2e and .. included). A file:// uri naming another host gets no path, so a path rule cannot allow it."""
+    args = {"uri": uri}
+    u = urlsplit(uri)
+    if u.scheme.lower() == "file" and u.netloc in ("", "localhost"):
+        args["path"] = unquote(u.path)
+    return args
 
 
 def _line(obj: Any) -> bytes:
@@ -248,11 +262,17 @@ class Proxy:
         if replies:
             self._to_client(_line(replies if isinstance(msg, list) else replies[0]))
 
+    def _judged(self, msg: Any) -> bool:
+        if not isinstance(msg, dict):
+            return False
+        m = msg.get("method")
+        return m == "tools/call" or (m == RESOURCE_READ and self.policy.guard_resources)
+
     def _message(self, msg: dict) -> None:
         # Everything forwarded is re-serialised from the parsed message, so the server receives
         # exactly what the policy judged, byte for byte.
         method = msg.get("method")
-        if method == "tools/call":
+        if self._judged(msg):
             if self._call(msg):
                 self._to_server(_line(msg))
         else:
@@ -264,7 +284,7 @@ class Proxy:
     def _batch(self, items: list) -> None:
         keep = []
         for item in items:
-            if isinstance(item, dict) and item.get("method") == "tools/call":
+            if self._judged(item):
                 if self._call(item):
                     keep.append(item)
             else:
@@ -277,20 +297,27 @@ class Proxy:
             self._to_server(_line(keep))
 
     def _call(self, msg: dict) -> bool:
-        """Judge one tools/call. True means forward it now."""
+        """Judge one tools/call (or resources/read). True means forward it now."""
         t0 = time.perf_counter_ns()
         msg_id = msg.get("id")
         has_id = "id" in msg
         params = msg.get("params")
-        name = params.get("name") if isinstance(params, dict) else None
-        args = params.get("arguments") if isinstance(params, dict) else None
-        if not isinstance(name, str) or (args is not None and not isinstance(args, dict)):
+        if msg.get("method") == RESOURCE_READ:
+            uri = params.get("uri") if isinstance(params, dict) else None
+            name, args = RESOURCE_READ, (resource_args(uri) if isinstance(uri, str) else None)
+            bad = "resources/read needs a string uri" if args is None else ""
+        else:
+            name = params.get("name") if isinstance(params, dict) else None
+            args = params.get("arguments") if isinstance(params, dict) else None
+            bad = "" if isinstance(name, str) and (args is None or isinstance(args, dict)) else \
+                "tools/call needs a string name and object arguments"
+        if bad:
             self._log({"event": "call", "id": msg_id, "tool": name if isinstance(name, str) else None,
-                       "decision": "deny", "rule": "malformed", "reason": "tools/call without a name or with non-object arguments"})
+                       "decision": "deny", "rule": "malformed", "reason": bad})
             self.stats["denied"] += 1
             if has_id:
                 self._to_client(_line({"jsonrpc": "2.0", "id": msg_id, "error": {
-                    "code": -32602, "message": "agent-guard: tools/call needs a string name and object arguments"}}))
+                    "code": -32602, "message": f"agent-guard: {bad}"}}))
             return False
         decision = self.policy.evaluate(name, args)
         eval_us = (time.perf_counter_ns() - t0) // 1000
@@ -319,6 +346,11 @@ class Proxy:
                 self._pending[_key(msg_id)] = (msg_id, name, time.perf_counter_ns())
 
     def _blocked(self, msg: dict, name: str, rule: str, reason: str) -> None:
+        if msg.get("method") == RESOURCE_READ:  # no tool result to carry it: a JSON-RPC error, like a missing resource
+            uri = (msg.get("params") or {}).get("uri")
+            self._to_client(_line({"jsonrpc": "2.0", "id": msg.get("id"), "error": {
+                "code": -32001, "message": f"agent-guard blocked reading {uri}: {reason} (rule: {rule})"}}))
+            return
         text = f"agent-guard blocked this call to {name}: {reason} (rule: {rule})"
         result: dict = {"content": [{"type": "text", "text": text}], "isError": True}
         if _wants_result_type(msg.get("params")):

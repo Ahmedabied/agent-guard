@@ -92,6 +92,7 @@ comes back as a tool error, and a write elsewhere goes through.
 version: 1
 default: deny              # what happens when no rule matches
 hide_denied_tools: true    # drop tools that can never pass from tools/list
+guard_resources: true      # judge resources/read too (off by default, see below)
 ask: {via: tty, timeout: 60}
 audit: {path: audit.jsonl}
 
@@ -141,6 +142,18 @@ rules are written to fail closed:
 - Typos in the policy (`decison: deny`, an unknown operator, a bad regex) stop it from loading, with the rule name.
 - So does a key written twice in one mapping, such as a second `rules:`. Plain YAML keeps the last one and silently
   drops every rule above it.
+
+**Resources.** An MCP server can expose files as resources, and a client reads them with `resources/read`, not a
+tool call, so a rule on `read_file` does not cover them. With `guard_resources: true` every read is judged like a
+call to a tool named `resources/read` with the arguments `uri` and, for a local `file://` uri, `path` (decoded,
+so `under:` sees through `..` and `%2e%2e`; a `file://` uri naming another host gets no path, so a path rule
+never allows it). A blocked read is answered with a JSON-RPC error. It is off by default only so an existing
+policy does not start refusing reads: with `default: deny`, turning it on refuses every read until a rule allows
+it, for example:
+
+```yaml
+  - {name: read-notes, tool: "resources/read", args: {path: {under: /data/notes}}, decision: allow}
+```
 
 `ask` sends the call to a person: `via: tty` asks on the terminal agent-guard was started from, `via: command`
 runs a command with the call as JSON on stdin (exit 0 approves), `via: deny` refuses. With nobody to ask, the
@@ -199,7 +212,8 @@ at most the result lines of calls still in flight; a power cut can lose the last
 ## Limits
 
 - **Stdio servers only.** Streamable HTTP is not proxied yet.
-- **Only `tools/call` is judged.** Resources, prompts and sampling requests pass through untouched.
+- **`tools/call` is judged, and `resources/read` with `guard_resources: true`.** Without it resource reads pass
+  through untouched; prompts and sampling requests always do.
 - **Patterns, not a sandbox.** A rule on a shell command string is a speed bump: a determined agent can phrase
   `rm` in ways a regex will not catch. `under` is lexical and does not follow symlinks, because the guard may not
   share a filesystem with the server. Pair agent-guard with server-side limits (allowed folders, read-only users,
@@ -217,7 +231,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk]'
-pytest -q                      # 79 tests
+pytest -q                      # 81 tests
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

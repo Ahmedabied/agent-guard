@@ -267,3 +267,44 @@ def test_a_message_the_guard_cannot_judge_is_denied_and_the_guard_keeps_serving(
     ok = s.call("echo", text="still here")
     assert ok["result"]["isError"] is False
     assert s.close() in (0, 70)
+
+
+RESOURCE_POLICY = POLICY.replace("hide_denied_tools: true\n", "hide_denied_tools: true\nguard_resources: true\n") + \
+    '  - {name: read-notes, tool: "resources/read", args: {path: {under: ROOT/notes}}, decision: allow}\n'
+
+
+def _open(tmp_path, policy):
+    sess = Session(tmp_path, policy=policy)
+    sess.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                "clientInfo": {"name": "test", "version": "0"}})
+    return sess
+
+
+def test_resource_reads_go_through_the_policy_when_guarded(tmp_path):
+    s = _open(tmp_path, RESOURCE_POLICY)
+    try:
+        ok = s.request("resources/read", {"uri": "file://" + s.path("notes/plan.md")})
+        assert ok["result"]["contents"][0]["text"] == "keep me"
+        for uri in ("file://" + s.path("scratch/old.txt"),                 # no rule allows it: default deny
+                    "file://" + s.path("notes") + "/../scratch/old.txt",    # .. is normalised before under:
+                    "file://" + s.path("notes") + "/%2e%2e/scratch/old.txt",  # and so is an encoded one
+                    "file://elsewhere" + s.path("notes/plan.md")):          # another host has no local path
+            r = s.request("resources/read", {"uri": uri})
+            assert r["error"]["code"] == -32001, (uri, r)
+            assert "agent-guard blocked reading" in r["error"]["message"]
+        bad = s.request("resources/read", {})
+        assert bad["error"]["code"] == -32602 and "needs a string uri" in bad["error"]["message"]
+    finally:
+        s.close()
+    events = [json.loads(line) for line in s.log.read_text().splitlines()]
+    reads = [e for e in events if e.get("tool") == "resources/read" and e["event"] == "call"]
+    assert [e["decision"] for e in reads] == ["allow", "deny", "deny", "deny", "deny", "deny"]
+
+
+def test_resource_reads_pass_through_unless_guard_resources_is_set(tmp_path):
+    s = _open(tmp_path, POLICY)
+    try:
+        r = s.request("resources/read", {"uri": "file://" + s.path("scratch/old.txt")})
+        assert r["result"]["contents"][0]["text"] == "tmp"  # the documented gap: off by default
+    finally:
+        s.close()
