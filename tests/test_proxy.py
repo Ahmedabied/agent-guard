@@ -254,18 +254,16 @@ def test_relative_path_cannot_slip_past_a_deny_rule(s):
     assert (s.root / "notes" / "plan.md").read_text() == "keep me"
 
 
-@pytest.mark.parametrize("bad", [{"text": "\ud800"}, {"text": [[[[0]]]] }])
-def test_a_message_the_guard_cannot_judge_is_denied_and_the_guard_keeps_serving(s, bad):
-    if "text" in bad and isinstance(bad["text"], list):
-        nested = 0
-        for _ in range(5000):
-            nested = [nested]
-        bad = {"text": nested}
-    raw = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
-                      "params": {"name": "echo", "arguments": bad}})
-    s.send(raw.encode())
+DEEP = b"[" * 5000 + b"0" + b"]" * 5000  # written by hand: json.dumps itself recurses too deep on some Pythons
+
+
+@pytest.mark.parametrize("args", [b'{"text": "\\ud800"}', b'{"text": ' + DEEP + b"}"], ids=["lone-surrogate", "deep-nesting"])
+def test_a_message_the_guard_cannot_judge_is_denied_and_the_guard_keeps_serving(s, args):
+    s.send(b'{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "echo", "arguments": ' + args + b"}}")
     r = s.recv()
-    assert r["id"] == 7 and ("error" in r or r["result"]["isError"] is True)
+    # Denied either way: as a parse error (id null) where the JSON parser gives up first, as on Python 3.10,
+    # or as an error for id 7 where the parser copes and the judging fails.
+    assert ("error" in r and r["id"] in (7, None)) or (r["id"] == 7 and r["result"]["isError"] is True)
     ok = s.call("echo", text="still here")
     assert ok["result"]["isError"] is False
     assert s.close() in (0, 70)
