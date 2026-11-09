@@ -32,7 +32,33 @@ def _key(msg_id: Any) -> str:
 
 
 def _line(obj: Any) -> bytes:
-    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
+    try:
+        return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
+    except UnicodeEncodeError:  # lone surrogates: escape everything instead
+        return json.dumps(obj, separators=(",", ":")).encode("ascii") + b"\n"
+
+
+def _no_duplicate_keys(pairs: list) -> dict:
+    out: dict = {}
+    for k, v in pairs:
+        if k in out:
+            raise ValueError(f"duplicate key {k!r}")
+        out[k] = v
+    return out
+
+
+def _no_constants(name: str) -> Any:
+    raise ValueError(f"{name} is not valid JSON")
+
+
+_STRICT = json.JSONDecoder(object_pairs_hook=_no_duplicate_keys, parse_constant=_no_constants)
+
+
+def parse_strict(raw: bytes) -> Any:
+    """Parse one client message the strict way. Duplicate keys, NaN and bad UTF-8 are refused,
+    because two parsers that disagree on them would let the server run a call the policy never
+    saw (for example {"name": "read_file", "name": "delete_file"})."""
+    return _STRICT.decode(raw.decode("utf-8"))
 
 
 class DenyApprover:
@@ -44,8 +70,9 @@ class TtyApprover:
     """Asks on the terminal the proxy was started from. MCP clients usually start servers
     without a terminal; then every ask is denied, which is the safe answer."""
 
-    def __init__(self, timeout: float = 60):
+    def __init__(self, timeout: float = 60, max_chars: int = 4000):
         self.timeout = timeout
+        self.max_chars = max_chars
         self._lock = threading.Lock()
 
     def __call__(self, tool: str, args: Any, decision: Decision) -> tuple[bool, str]:
@@ -55,11 +82,14 @@ class TtyApprover:
             except OSError:
                 return False, "no terminal to ask on"
             with os.fdopen(fd, "r+b", buffering=0) as tty:
-                shown = json.dumps(args, ensure_ascii=False)
-                if len(shown) > 500:
-                    shown = shown[:500] + "..."
-                tty.write(f"\nagent-guard: {tool} {shown}\n  rule {decision.rule}: {decision.reason}\n"
-                          f"  allow this call? [y/N] ".encode())
+                # ASCII only: control and bidi characters cannot disguise what is being approved.
+                shown = json.dumps(args, ensure_ascii=True, indent=2, sort_keys=True)
+                name = json.dumps(tool, ensure_ascii=True)
+                if len(shown) > self.max_chars:
+                    tty.write(f"\nagent-guard: denied {name}: arguments too long to show ({len(shown)} chars)\n".encode())
+                    return False, f"arguments too long to show for approval ({len(shown)} chars)"
+                tty.write(f"\nagent-guard: {name} with arguments\n{shown}\n  rule {decision.rule}: "
+                          f"{decision.reason}\n  allow this call? [y/N] ".encode("ascii", "backslashreplace"))
                 ready, _, _ = select.select([tty], [], [], self.timeout)
                 if not ready:
                     tty.write(b"\n  no answer, denied\n")
@@ -172,29 +202,33 @@ class Proxy:
                 if not raw.strip():
                     continue
                 try:
-                    msg = json.loads(raw)
-                except ValueError:
-                    self._to_server(raw)  # not ours to judge; the server answers parse errors
+                    msg = parse_strict(raw)
+                except ValueError as e:  # never forward what we could not judge
+                    self._log({"event": "rejected", "reason": f"unparseable client message: {e}"[:300]})
+                    self._to_client(_line({"jsonrpc": "2.0", "id": None, "error": {
+                        "code": -32700, "message": f"agent-guard: parse error: {e}"[:300]}}))
                     continue
                 if isinstance(msg, list):
                     self._batch(msg)
                 elif isinstance(msg, dict):
-                    self._message(msg, raw)
+                    self._message(msg)
                 else:
-                    self._to_server(raw)
+                    self._to_server(_line(msg))
         finally:
             self._done.set()
 
-    def _message(self, msg: dict, raw: bytes) -> None:
+    def _message(self, msg: dict) -> None:
+        # Everything forwarded is re-serialised from the parsed message, so the server receives
+        # exactly what the policy judged, byte for byte.
         method = msg.get("method")
         if method == "tools/call":
             if self._call(msg):
-                self._to_server(raw)
+                self._to_server(_line(msg))
         else:
             if method == "tools/list" and "id" in msg and self.policy.hide_denied_tools:
                 with self._state_lock:
                     self._list_ids.add(_key(msg["id"]))
-            self._to_server(raw)
+            self._to_server(_line(msg))
 
     def _batch(self, items: list) -> None:
         keep = []

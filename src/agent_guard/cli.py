@@ -42,7 +42,14 @@ def cmd_run(a) -> int:
     scrub = Scrubber(policy.audit.get("redact"), int(policy.audit.get("max_value_chars", 2000)))
     with AuditLog(log_path, fsync=bool(policy.audit.get("fsync", False))) as audit:
         proxy = Proxy(policy, a.command, audit=audit, scrub=scrub, approver=make_approver(policy.ask), quiet=a.quiet)
-        return proxy.run()
+        code = proxy.run()
+    # The client reader thread may still be blocked on stdin, holding its buffer lock. A normal
+    # interpreter exit would abort on that lock, so flush what matters and leave directly.
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    finally:
+        os._exit(code)
 
 
 def cmd_check(a) -> int:
