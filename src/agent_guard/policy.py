@@ -123,13 +123,18 @@ class Condition:
                 self.checks.append((op, val))
         self.negative_only = all(op.startswith("not_") for op, _ in self.checks)
 
-    def test(self, value: Any, present: bool = True) -> bool:
+    def test(self, value: Any, present: bool = True, strict: bool = False) -> bool:
+        """Does the value pass every operator?
+
+        strict=True is used by allow rules: when the value is a list or mapping, every string
+        inside it must pass. strict=False is used by deny and ask rules: one is enough. Either
+        way a wrongly typed value cannot slip past a rule.
+        """
+        if not present:
+            # A missing argument cannot match a pattern. Deny rules built only from "not_*"
+            # still apply (fail closed); allow rules never match on a missing argument.
+            return self.negative_only and not strict
         for op, arg in self.checks:
-            if not present:
-                # A missing argument cannot match a pattern, so "not_*" holds and the rest fail.
-                if op.startswith("not_"):
-                    continue
-                return False
             if op == "equals":
                 ok = _same(value, arg)
             elif op == "contains":
@@ -139,30 +144,40 @@ class Condition:
                     ok = any(_same(v, arg) for v in value)
                 else:
                     ok = False
-            elif op in ("under", "not_under"):
-                ok = isinstance(value, str) and _is_under(value, arg)
-                if op == "not_under":
-                    ok = not ok
+            elif isinstance(value, (dict, list)):
+                leaves = list(_leaves(value))
+                quantifier = all if strict else any
+                ok = bool(leaves) and quantifier(_check(op, arg, v) for v in leaves)
             else:
-                text = value if isinstance(value, str) else canonical(value)
-                if op == "glob":
-                    ok = arg.match(text) is not None
-                elif op == "not_glob":
-                    ok = arg.match(text) is None
-                elif op == "regex":
-                    ok = arg.search(text) is not None
-                else:  # not_regex
-                    ok = arg.search(text) is None
+                ok = _check(op, arg, value)
             if not ok:
                 return False
         return True
 
 
+def _check(op: str, arg: Any, value: Any) -> bool:
+    if op == "under":
+        return isinstance(value, str) and _is_under(value, arg)
+    if op == "not_under":
+        return not (isinstance(value, str) and _is_under(value, arg))
+    text = value if isinstance(value, str) else canonical(value)
+    if op == "glob":
+        return arg.match(text) is not None
+    if op == "not_glob":
+        return arg.match(text) is None
+    if op == "regex":
+        return arg.search(text) is not None
+    return arg.search(text) is None  # not_regex
+
+
 def _lookup(args: Any, key: str) -> Any:
+    """A plain key reads one argument. A dotted key ("opts.force", "files.0") is always a
+    nested path, never a literal key, so a caller cannot shadow it with an argument that
+    happens to contain dots."""
     if not isinstance(args, dict):
         return _MISSING
-    if key in args:
-        return args[key]
+    if "." not in key:
+        return args.get(key, _MISSING)
     cur: Any = args
     for part in key.split("."):
         if isinstance(cur, dict) and part in cur:
@@ -234,13 +249,16 @@ class Rule:
     def matches(self, tool: str, args: Any) -> bool:
         if self.tool_rx is not None and self.tool_rx.match(tool) is None:
             return False
+        strict = self.action == "allow"
         for key, cond in self.conditions:
             if key == "*":
-                if not any(cond.test(v) for v in _leaves(args)):
+                leaves = list(_leaves(args))
+                quantifier = all if strict else any
+                if not (leaves and quantifier(cond.test(v, True, strict) for v in leaves)):
                     return False
             else:
                 value = _lookup(args, key)
-                if not cond.test(value, value is not _MISSING):
+                if not cond.test(value, value is not _MISSING, strict):
                     return False
         return True
 

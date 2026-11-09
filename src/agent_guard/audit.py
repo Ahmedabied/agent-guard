@@ -11,6 +11,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,7 +24,20 @@ except ImportError:  # Windows: one writer per log file
     fcntl = None
 
 GENESIS = "0" * 64
-DEFAULT_REDACT = ["*password*", "*passwd*", "*secret*", "*token*", "*api_key*", "*apikey*", "authorization", "cookie"]
+DEFAULT_REDACT = [
+    "*password*", "*passwd*", "*secret*", "*token*", "*api_key*", "*apikey*", "*access_key*",
+    "*private_key*", "*credential*", "*auth*", "*cookie*", "*session*",
+]
+# Values that look like a secret are redacted whatever their key is called.
+SECRET_VALUE = re.compile(
+    r"(?i:bearer\s+[a-z0-9._~+/=-]{16,})"
+    r"|-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"
+    r"|\bAKIA[0-9A-Z]{16}\b"
+    r"|\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pa[t]_[A-Za-z0-9_]{30,})"
+    r"|\bsk-[A-Za-z0-9_-]{20,}"
+    r"|\bxox[abprs]-[A-Za-z0-9-]{10,}"
+    r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"  # JWT
+)
 DEFAULT_MAX_VALUE_CHARS = 2000
 
 
@@ -44,6 +58,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _norm_key(key: str) -> str:
+    # "X-Api-Key", "x_api_key" and "xApiKey" all become "x_api_key"-like for matching.
+    key = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    return key.lower().replace("-", "_")
+
+
 class Scrubber:
     """Removes secrets and huge values from arguments before they are written to the log."""
 
@@ -51,14 +71,14 @@ class Scrubber:
         patterns = DEFAULT_REDACT if redact is None else redact
         self._rx = None
         if patterns:
-            import re
-
-            self._rx = re.compile("|".join(f"(?:{fnmatch.translate(p.lower())})" for p in patterns))
+            self._rx = re.compile("|".join(f"(?:{fnmatch.translate(_norm_key(p))})" for p in patterns))
         self.max = max_value_chars
 
     def __call__(self, value: Any, key: str | None = None) -> Any:
-        if key is not None and self._rx is not None and self._rx.match(key.lower()):
+        if key is not None and self._rx is not None and self._rx.match(_norm_key(key)):
             return "[redacted]"
+        if isinstance(value, str) and SECRET_VALUE.search(value):
+            return "[redacted: looks like a secret]"
         if isinstance(value, dict):
             return {k: self(v, str(k)) for k, v in value.items()}
         if isinstance(value, list):

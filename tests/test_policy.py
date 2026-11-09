@@ -151,3 +151,43 @@ def test_parse_rate():
     assert parse_rate("10/minute", "x") == (10, 60.0)
     assert parse_rate("5/10s", "x") == (5, 10.0)
     assert parse_rate("100 / hour", "x") == (100, 3600.0)
+
+
+def test_dotted_key_cannot_be_shadowed_by_literal_key():
+    p = Policy.from_yaml("""
+default: allow
+rules:
+  - {name: no-force, tool: push, args: {opts.force: true}, decision: deny}
+""")
+    assert p.evaluate("push", {"opts.force": False, "opts": {"force": True}}).action == "deny"
+    assert p.evaluate("push", {"opts.force": True}).action == "allow"  # not the nested path
+
+
+def test_lists_and_maps_are_checked_per_value():
+    p = Policy.from_yaml("""
+default: deny
+rules:
+  - {name: no-etc, tool: read, args: {path: {under: /etc}}, decision: deny}
+  - {name: data-only, tool: read, args: {path: {under: /data}}, decision: allow}
+  - {name: shell-ls, tool: sh, args: {"*": {regex: "^ls( |$)"}}, decision: allow}
+""")
+    # Deny rules fire when any value inside matches.
+    assert p.evaluate("read", {"path": ["/data/a", "/etc/shadow"]}).rule == "no-etc"
+    assert p.evaluate("read", {"path": {"p": "/etc/shadow"}}).rule == "no-etc"
+    # Allow rules need every value inside to match.
+    assert p.evaluate("read", {"path": ["/data/a", "/data/b"]}).action == "allow"
+    assert p.evaluate("read", {"path": ["/data/a", "/tmp/b"]}).action == "deny"
+    assert p.evaluate("read", {"path": []}).action == "deny"
+    assert p.evaluate("sh", {"cmd": "ls -la"}).action == "allow"
+    assert p.evaluate("sh", {"cmd": "rm -rf /", "note": "ls"}).action == "deny"
+    assert p.evaluate("sh", {}).action == "deny"
+
+
+def test_allow_rule_does_not_match_missing_argument():
+    p = Policy.from_yaml("""
+default: deny
+rules:
+  - {name: not-secret, tool: read, args: {path: {not_glob: "*.key"}}, decision: allow}
+""")
+    assert p.evaluate("read", {"path": "a.txt"}).action == "allow"
+    assert p.evaluate("read", {}).action == "deny"

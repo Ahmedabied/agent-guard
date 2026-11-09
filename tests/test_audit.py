@@ -101,6 +101,19 @@ def test_two_writers_on_one_file(tmp_path):
     assert verify(p).entries == 10 and verify(p).ok
 
 
+def test_scrubber_keys_and_secret_values():
+    s = Scrubber()
+    fake_gh = "gh" + "p_" + "a1" * 18
+    fake_pem = "-----BEGIN " + "RSA PRIVATE KEY-----\nMIIB"
+    out = s({
+        "X-Api-Key": "k", "xApiKey": "k", "client-secret": "s", "auth_header": "a",
+        "note": f"use {fake_gh} please", "cfg": fake_pem, "msg": "hello", "author_count": 2,
+    })
+    assert out["X-Api-Key"] == out["xApiKey"] == out["client-secret"] == out["auth_header"] == "[redacted]"
+    assert out["note"].startswith("[redacted: looks") and out["cfg"].startswith("[redacted: looks")
+    assert out["msg"] == "hello"
+
+
 def test_scrubber():
     s = Scrubber(max_value_chars=50)
     out = s({"path": "/x", "api_key": "abc", "headers": {"Authorization": "Bearer x"}, "body": "y" * 100, "n": 3})
