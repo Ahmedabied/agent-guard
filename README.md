@@ -77,6 +77,10 @@ Wherever your MCP client config names a stdio server, put `agent-guard run -p <p
 }
 ```
 
+MCP clients often start servers with a short `PATH`. If `agent-guard` is not found, use the full path to it
+(for example `/path/to/agent-guard/.venv/bin/agent-guard`), or let uv fetch it:
+`"command": "uvx", "args": ["--from", "git+https://github.com/Ahmedabied/agent-guard", "agent-guard", "run", ...]`.
+
 Checked with the official filesystem server (`@modelcontextprotocol/server-filesystem`) driven by the official
 MCP Python SDK client: tools the policy never allows disappear from the list, a write into a read-only folder
 comes back as a tool error, and a write elsewhere goes through.
@@ -184,7 +188,7 @@ directly and once through agent-guard with the example policy and a real audit l
 Five runs on an Intel i5-14400F, Python 3.12, with the machine busy (load 3.4). Most of the added time is the two
 extra pipe hops and thread wake-ups, not the checks: the policy is 3.6 us and the audit write about 12 us.
 Every call is written to the log before it is forwarded. With fsync off, a crash of agent-guard itself can lose
-at most the result line of a call in flight; a power cut can lose the last entries. Turn on
+at most the result lines of calls still in flight; a power cut can lose the last entries. Turn on
 `audit: {fsync: true}` if that matters more than 0.7 ms per call.
 
 ## Limits
