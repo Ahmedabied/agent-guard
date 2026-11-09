@@ -46,14 +46,20 @@ def _key(msg_id: Any) -> str:
 RESOURCE_READ = "resources/read"
 
 
-def resource_args(uri: str) -> dict:
-    """What a rule sees for resources/read: the uri, and for a local file:// uri its decoded path, so `under:` works
-    on it (%2e%2e and .. included). A file:// uri naming another host gets no path, so a path rule cannot allow it."""
-    args = {"uri": uri}
-    u = urlsplit(uri)
-    if u.scheme.lower() == "file" and u.netloc in ("", "localhost"):
-        args["path"] = unquote(u.path)
-    return args
+def resource_args(uri: str) -> tuple[dict | None, str]:
+    """What a rule sees for resources/read: uri, scheme, host and the decoded path, for every scheme, because servers
+    read the path and ignore the rest; a deny rule on path must see the same path whatever wraps it. `under:` then
+    sees through `..` and `%2e%2e`. Refused before any rule (args None, and why): a uri that does not parse, and a
+    file:// uri naming another host, whose path would not mean what a rule thinks it means."""
+    try:
+        u = urlsplit(uri)
+        host = u.hostname or ""
+    except ValueError:
+        return None, "resources/read needs a uri that parses"
+    scheme = u.scheme.lower()
+    if scheme == "file" and host not in ("", "localhost"):
+        return None, f"a file:// uri naming another host ({host}) is refused"
+    return {"uri": uri, "scheme": scheme, "host": host, "path": unquote(u.path)}, ""
 
 
 def _line(obj: Any) -> bytes:
@@ -304,8 +310,8 @@ class Proxy:
         params = msg.get("params")
         if msg.get("method") == RESOURCE_READ:
             uri = params.get("uri") if isinstance(params, dict) else None
-            name, args = RESOURCE_READ, (resource_args(uri) if isinstance(uri, str) else None)
-            bad = "resources/read needs a string uri" if args is None else ""
+            name = RESOURCE_READ
+            args, bad = resource_args(uri) if isinstance(uri, str) else (None, "resources/read needs a string uri")
         else:
             name = params.get("name") if isinstance(params, dict) else None
             args = params.get("arguments") if isinstance(params, dict) else None

@@ -270,7 +270,7 @@ def test_a_message_the_guard_cannot_judge_is_denied_and_the_guard_keeps_serving(
 
 
 RESOURCE_POLICY = POLICY.replace("hide_denied_tools: true\n", "hide_denied_tools: true\nguard_resources: true\n") + \
-    '  - {name: read-notes, tool: "resources/read", args: {path: {under: ROOT/notes}}, decision: allow}\n'
+    '  - {name: read-notes, tool: "resources/read", args: {scheme: file, path: {under: ROOT/notes}}, decision: allow}\n'
 
 
 def _open(tmp_path, policy):
@@ -288,17 +288,19 @@ def test_resource_reads_go_through_the_policy_when_guarded(tmp_path):
         for uri in ("file://" + s.path("scratch/old.txt"),                 # no rule allows it: default deny
                     "file://" + s.path("notes") + "/../scratch/old.txt",    # .. is normalised before under:
                     "file://" + s.path("notes") + "/%2e%2e/scratch/old.txt",  # and so is an encoded one
-                    "file://elsewhere" + s.path("notes/plan.md")):          # another host has no local path
+                    "notes://x" + s.path("notes/plan.md")):                  # the rule asks for file://
             r = s.request("resources/read", {"uri": uri})
             assert r["error"]["code"] == -32001, (uri, r)
             assert "agent-guard blocked reading" in r["error"]["message"]
+        remote = s.request("resources/read", {"uri": "file://elsewhere" + s.path("notes/plan.md")})
+        assert remote["error"]["code"] == -32602 and "another host (elsewhere)" in remote["error"]["message"]
         bad = s.request("resources/read", {})
         assert bad["error"]["code"] == -32602 and "needs a string uri" in bad["error"]["message"]
     finally:
         s.close()
     events = [json.loads(line) for line in s.log.read_text().splitlines()]
     reads = [e for e in events if e.get("tool") == "resources/read" and e["event"] == "call"]
-    assert [e["decision"] for e in reads] == ["allow", "deny", "deny", "deny", "deny", "deny"]
+    assert [e["decision"] for e in reads] == ["allow", "deny", "deny", "deny", "deny", "deny", "deny"]
 
 
 def test_resource_reads_pass_through_unless_guard_resources_is_set(tmp_path):
@@ -306,5 +308,28 @@ def test_resource_reads_pass_through_unless_guard_resources_is_set(tmp_path):
     try:
         r = s.request("resources/read", {"uri": "file://" + s.path("scratch/old.txt")})
         assert r["result"]["contents"][0]["text"] == "tmp"  # the documented gap: off by default
+    finally:
+        s.close()
+
+
+DENY_POLICY = """
+default: allow
+guard_resources: true
+rules:
+  - {name: no-scratch, tool: "resources/read", args: {path: {under: ROOT/scratch}}, decision: deny}
+"""
+
+
+def test_a_deny_rule_on_path_cannot_be_dodged_by_host_or_scheme(tmp_path):
+    # Servers read the path and ignore the rest, so the rule must see the same path whatever wraps it.
+    s = _open(tmp_path, DENY_POLICY)
+    try:
+        assert s.request("resources/read", {"uri": "file://" + s.path("notes/plan.md")})["result"]
+        for uri in ("file://elsewhere" + s.path("scratch/old.txt"),     # refused outright: another host
+                    "notes://x" + s.path("scratch/old.txt"),             # any scheme: the path is still judged
+                    "FILE://" + s.path("scratch/old.txt"),
+                    "file://[::1" + s.path("scratch/old.txt")):          # does not parse: refused
+            r = s.request("resources/read", {"uri": uri})
+            assert "error" in r and "agent-guard" in r["error"]["message"], (uri, r)
     finally:
         s.close()

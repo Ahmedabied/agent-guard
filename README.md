@@ -145,14 +145,15 @@ rules are written to fail closed:
 
 **Resources.** An MCP server can expose files as resources, and a client reads them with `resources/read`, not a
 tool call, so a rule on `read_file` does not cover them. With `guard_resources: true` every read is judged like a
-call to a tool named `resources/read` with the arguments `uri` and, for a local `file://` uri, `path` (decoded,
-so `under:` sees through `..` and `%2e%2e`; a `file://` uri naming another host gets no path, so a path rule
-never allows it). A blocked read is answered with a JSON-RPC error. It is off by default only so an existing
+call to a tool named `resources/read` with the arguments `uri`, `scheme`, `host` and `path`, the decoded path for
+every scheme, because servers read the path and ignore the rest: a deny rule on `path` sees the same path however
+the uri wraps it, and `under:` sees through `..` and `%2e%2e`. A uri that does not parse, or a `file://` uri naming
+another host, is refused before any rule. A blocked read is answered with a JSON-RPC error. It is off by default only so an existing
 policy does not start refusing reads: with `default: deny`, turning it on refuses every read until a rule allows
 it, for example:
 
 ```yaml
-  - {name: read-notes, tool: "resources/read", args: {path: {under: /data/notes}}, decision: allow}
+  - {name: read-notes, tool: "resources/read", args: {scheme: file, path: {under: /data/notes}}, decision: allow}
 ```
 
 `ask` sends the call to a person: `via: tty` asks on the terminal agent-guard was started from, `via: command`
@@ -231,7 +232,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk]'
-pytest -q                      # 81 tests
+pytest -q                      # 82 tests
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on
