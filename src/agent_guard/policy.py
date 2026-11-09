@@ -30,6 +30,42 @@ _UNITS = {
 }
 
 
+
+class _StrictLoader(yaml.SafeLoader):
+    """safe_load, except that a key written twice in one mapping is an error.
+
+    Plain YAML keeps the last of two equal keys, so a second `rules:` would silently drop every rule
+    above it. In a policy that is a hole, not a style issue."""
+
+
+def _strict_mapping(loader: _StrictLoader, node: yaml.MappingNode, deep: bool = False) -> dict:
+    seen: dict[Any, int] = {}
+    for key_node, _ in node.value:
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            continue  # `<<: *base` then overriding a key from base is fine
+        key = loader.construct_object(key_node, deep=True)
+        try:
+            first = seen.get(key)
+        except TypeError:  # an unhashable key; the normal constructor reports it
+            break
+        if first is not None:
+            raise PolicyError(f"line {key_node.start_mark.line + 1}: {key!r} is written twice in the same mapping "
+                              f"(first on line {first}); YAML would keep only the last one")
+        seen[key] = key_node.start_mark.line + 1
+    return loader.construct_mapping(node, deep=deep)
+
+
+_StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _strict_mapping)
+
+
+def load_yaml(text: str, source: str = "<policy>") -> Any:
+    try:
+        return yaml.load(text, Loader=_StrictLoader)  # noqa: S506 - a SafeLoader subclass
+    except PolicyError as e:
+        raise PolicyError(f"{source}: {e}") from None
+    except yaml.YAMLError as e:
+        raise PolicyError(f"{source}: not valid YAML: {e}") from None
+
 class PolicyError(ValueError):
     """The policy file is invalid. The message says where and why."""
 
@@ -346,15 +382,11 @@ class Policy:
     @classmethod
     def from_file(cls, path: str | Path) -> "Policy":
         path = Path(path)
-        try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except yaml.YAMLError as e:
-            raise PolicyError(f"{path}: not valid YAML: {e}") from None
-        return cls(data, str(path))
+        return cls(load_yaml(path.read_text(encoding="utf-8"), str(path)), str(path))
 
     @classmethod
     def from_yaml(cls, text: str, source: str = "<policy>") -> "Policy":
-        return cls(yaml.safe_load(text), source)
+        return cls(load_yaml(text, source), source)
 
     def evaluate(self, tool: str, args: Any = None, now: float | None = None, charge: bool = True) -> Decision:
         """Decide one call. With charge=True an allowed call counts against its rate rules."""

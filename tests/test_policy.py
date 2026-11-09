@@ -269,3 +269,16 @@ rules:
 """)
     assert p.evaluate("read_file", {"path": "/workspace/a.txt"}).action == "allow"
     assert p.evaluate("read_file", {"path": "/workspace/../etc/shadow"}).action == "deny"
+
+
+def test_a_key_written_twice_is_refused_not_silently_dropped(tmp_path):
+    twice = "default: deny\nrules:\n  - name: no-rm\n    tool: delete_file\n    decision: deny\nrules: []\n"
+    with pytest.raises(PolicyError, match="'rules' is written twice"):
+        Policy.from_yaml(twice)
+    f = tmp_path / "guard.yaml"
+    f.write_text("rules:\n  - name: a\n    tool: t\n    tool: u\n    decision: allow\n")
+    with pytest.raises(PolicyError, match="line 4: 'tool' is written twice"):
+        Policy.from_file(f)
+    # A merge key that a mapping then overrides is normal YAML, not a duplicate.
+    merged = "default: allow\nrules:\n  - &b {name: a, tool: t, decision: deny}\n  - <<: *b\n    name: b\n    tool: u\n"
+    assert Policy.from_yaml(merged).evaluate("u", {}).rule == "b"

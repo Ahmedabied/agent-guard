@@ -139,6 +139,8 @@ rules are written to fail closed:
   message exactly as it was judged. Two JSON parsers that disagree on `{"name": "read_file", "name": "delete_file"}`
   would otherwise let one call through as another.
 - Typos in the policy (`decison: deny`, an unknown operator, a bad regex) stop it from loading, with the rule name.
+- So does a key written twice in one mapping, such as a second `rules:`. Plain YAML keeps the last one and silently
+  drops every rule above it.
 
 `ask` sends the call to a person: `via: tty` asks on the terminal agent-guard was started from, `via: command`
 runs a command with the call as JSON on stdin (exit 0 approves), `via: deny` refuses. With nobody to ask, the
@@ -170,7 +172,9 @@ agent-guard test -p guard.yaml guard-tests.yaml            # add this to CI
 
 `learn` puts the rule at the top of the policy (first match wins, so it beats any broader allow), keeps your
 comments and layout, refuses to write a rule that would not have caught the incident, and appends a regression
-case to `guard-tests.yaml`. Without `--match` it matches the exact values from the incident.
+case to `guard-tests.yaml`. It edits the text and then checks the parsed result: the new policy must be the old
+one with exactly one rule added in front, or nothing is written. An inline list (`rules: [...]`) is refused with a
+request to write it as a block list. Without `--match` it matches the exact values from the incident.
 
 `agent-guard check -p guard.yaml delete_file '{"path": "/data/notes/a.md"}'` shows the decision for one call
 without running anything (exit code 0 allow, 1 deny, 3 ask).
@@ -213,7 +217,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk]'
-pytest -q                      # 76 tests
+pytest -q                      # 79 tests
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

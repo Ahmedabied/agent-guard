@@ -5,7 +5,8 @@ import pytest
 
 from agent_guard.audit import AuditLog
 from agent_guard.learn import Incident, LearnError, incident_from_log, insert_rule, learn, load_cases, run_cases
-from agent_guard.policy import Policy
+from agent_guard import learn as learn_mod
+from agent_guard.policy import Policy, PolicyError
 
 POLICY = """\
 # my agent's policy
@@ -131,3 +132,28 @@ def test_cli_bad_policy_is_a_clear_error(tmp_path):
     policy.write_text("rules: [{name: a, decison: deny}]")
     r = cli("check", "-p", str(policy), "x")
     assert r.returncode == 2 and "unknown key" in r.stderr
+
+
+def test_learn_refuses_an_inline_rules_list_instead_of_dropping_it(tmp_path):
+    # Appending a second `rules:` would make YAML keep only the new one: every old rule gone.
+    policy = tmp_path / "guard.yaml"
+    text = "default: deny\nrules: [{name: work, tool: read_file, decision: allow}]\n"
+    policy.write_text(text)
+    with pytest.raises(LearnError, match="written inline"):
+        learn(policy, tmp_path / "t.yaml", Incident("delete_file", {"path": "/x"}, "test"), "no-del", "r")
+    assert policy.read_text() == text
+    assert not (tmp_path / "t.yaml").exists()
+
+
+def test_learn_refuses_a_policy_with_a_key_written_twice(tmp_path):
+    policy = tmp_path / "guard.yaml"
+    policy.write_text("default: deny\nrules:\n  - name: a\n    tool: t\n    decision: allow\nrules: []\n")
+    with pytest.raises(PolicyError, match="'rules' is written twice"):
+        learn(policy, tmp_path / "t.yaml", Incident("t", {}, "test"), "x", "r")
+
+
+def test_insert_rule_is_checked_on_the_parsed_result(monkeypatch):
+    # Whatever the text edit does, the result must be the old policy with one rule in front.
+    monkeypatch.setattr(learn_mod, "_insert_text", lambda text, rule, comment: "default: deny\nrules: []\n")
+    with pytest.raises(LearnError, match="add it by hand"):
+        insert_rule(POLICY, {"name": "x", "tool": "t", "decision": "deny", "reason": "r"}, "c")

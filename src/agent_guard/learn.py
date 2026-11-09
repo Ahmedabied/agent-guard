@@ -17,7 +17,7 @@ from typing import Any
 import yaml
 
 from .audit import read_entries
-from .policy import Policy, PolicyError
+from .policy import Policy, PolicyError, load_yaml
 
 
 class LearnError(ValueError):
@@ -84,8 +84,40 @@ def _rule_block(rule: dict, indent: str, comment: str) -> str:
     return "\n".join(out) + "\n"
 
 
+def _rules_node(policy_text: str) -> yaml.Node | None:
+    root = yaml.compose(policy_text, Loader=yaml.SafeLoader)
+    if isinstance(root, yaml.MappingNode):
+        for k, v in root.value:
+            if isinstance(k, yaml.ScalarNode) and k.value == "rules":
+                return v
+    return None
+
+
 def insert_rule(policy_text: str, rule: dict, comment: str) -> str:
-    """Put the rule first in the rules list, keeping the rest of the file as written."""
+    """Put the rule first in the rules list, keeping the rest of the file as written.
+
+    The edit is made on the text, so comments survive; it is then checked on the parsed result, and
+    refused unless the new policy is exactly the old one with the rule added in front."""
+    before = load_yaml(policy_text)
+    node = _rules_node(policy_text)
+    if isinstance(node, yaml.SequenceNode) and node.flow_style and node.value:
+        raise LearnError("the rules list is written inline (rules: [...]); write it as a block list, one '- ' per "
+                         "rule, so learn can add to it without rewriting your file")
+    new_text = _insert_text(policy_text, rule, comment)
+    after = load_yaml(new_text)
+    before = before if isinstance(before, dict) else {}
+
+    def rest(d: dict) -> dict:
+        return {k: v for k, v in d.items() if k != "rules"}
+
+    expected = [yaml.safe_load(yaml.safe_dump(rule))] + list(before.get("rules") or [])
+    if not isinstance(after, dict) or after.get("rules") != expected or rest(after) != rest(before):
+        raise LearnError("could not add the rule without changing the rest of the policy; add it by hand, first "
+                         "in the rules list:\n" + _rule_block(rule, "  ", comment))
+    return new_text
+
+
+def _insert_text(policy_text: str, rule: dict, comment: str) -> str:
     lines = policy_text.splitlines(keepends=True)
     for i, ln in enumerate(lines):
         m = re.match(r"^rules:\s*(\[\s*\])?\s*(#.*)?$", ln.rstrip("\n"))
