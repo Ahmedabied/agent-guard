@@ -145,10 +145,13 @@ rules are written to fail closed:
 
 **Resources.** An MCP server can expose files as resources, and a client reads them with `resources/read`, not a
 tool call, so a rule on `read_file` does not cover them. With `guard_resources: true` every read is judged like a
-call to a tool named `resources/read` with the arguments `uri`, `scheme`, `host` and `path`. For a local `file://`
-uri, `path` is the decoded path, so `under:` sees through `..` and `%2e%2e`. For any other scheme, `path` is the raw
-uri, which cannot be placed in a folder: path deny rules match it and path allow rules never pass it, so allow
-those reads by `scheme` or `uri` (rules on `uri` see it as sent, percent-encoding included). Refused before any
+call to a tool named `resources/read` with the arguments `uri`, `scheme`, `host` and `path`, each holding every
+reading a server might take (a deny rule matches if any reading does, an allow rule must pass them all). For a
+local `file://` uri, `path` is the decoded path, so `under:` sees through `..` and `%2e%2e`. For any other scheme,
+`path` is the decoded path, the decoded host and path together, and the raw uri; the raw uri cannot be placed in a
+folder, so `under:` deny rules always catch another scheme and `under:` allow rules never pass one: allow those by
+`scheme` or `uri` (rules on `uri` see it as sent, percent-encoding included). `host` is the host as written and
+lowercased without user or port. Refused before any
 rule: a uri that does not parse or has no scheme, and a `file://` uri naming another host, port or user (servers
 tend to read the path and ignore the host, so a rule would judge a different file). A blocked read is answered
 with a JSON-RPC error. It is off by default only so an existing
@@ -235,7 +238,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk]'
-pytest -q                      # 83 tests
+pytest -q                      # 84 tests
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

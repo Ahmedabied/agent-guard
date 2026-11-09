@@ -46,15 +46,24 @@ def _key(msg_id: Any) -> str:
 RESOURCE_READ = "resources/read"
 
 
-def resource_args(uri: str) -> tuple[dict | None, str]:
-    """What a rule sees for resources/read: uri, scheme, host (the raw netloc) and path. Fails closed both ways.
+def _readings(*values: str) -> str | list[str]:
+    """One value, or every distinct reading as a list: a deny rule matches if any matches, an allow rule needs all."""
+    out = list(dict.fromkeys(values))
+    return out[0] if len(out) == 1 else out
 
-    A local file:// uri gets its decoded path, so `under:` sees through `..` and `%2e%2e`. Any other scheme gets the
-    raw uri as its path: not a filesystem path, so it cannot be placed, which makes path deny rules match it and path
-    allow rules never pass it (allow those by `scheme` or `uri`). Refused before any rule (args None, and why): a uri
-    that does not parse or has no scheme, and a file:// uri naming another host, port or user."""
+
+def resource_args(uri: str) -> tuple[dict | None, str]:
+    """What a rule sees for resources/read: uri, scheme, host and path, each as every reading a server might take.
+
+    A local file:// uri: path is the decoded path, so `under:` sees through `..` and `%2e%2e`. Any other scheme: path
+    is the decoded path, the decoded host and path together (some servers read the host as a folder), and the raw
+    uri. The raw uri cannot be placed in a folder, so `under:` deny rules always match another scheme and `under:`
+    allow rules never pass one (allow those by `scheme` or `uri`). host is the raw netloc and the lowercased host
+    name. Refused before any rule (args None, and why): a uri that does not parse or has no scheme, and a file://
+    uri naming another host, port or user."""
     try:
         u = urlsplit(uri)
+        hostname = u.hostname or ""
     except ValueError:
         return None, "resources/read needs a uri that parses"
     scheme = u.scheme.lower()
@@ -65,8 +74,8 @@ def resource_args(uri: str) -> tuple[dict | None, str]:
             return None, f"a file:// uri naming another host ({u.netloc}) is refused"
         path = unquote(u.path)
     else:
-        path = uri
-    return {"uri": uri, "scheme": scheme, "host": u.netloc, "path": path}, ""
+        path = _readings(unquote(u.path), unquote(u.netloc + u.path), uri)
+    return {"uri": uri, "scheme": scheme, "host": _readings(u.netloc, hostname), "path": path}, ""
 
 
 def _line(obj: Any) -> bytes:
