@@ -21,6 +21,7 @@ classifiers = [
 [project.optional-dependencies]
 test = ["pytest>=8"]
 sdk = ["mcp>=2"]
+http = ["starlette>=0.46", "uvicorn>=0.31", "httptools>=0.6", "httpx2>=2.10", "anyio>=4.5"]
 
 [project.scripts]
 agent-guard = "agent_guard.cli:main"

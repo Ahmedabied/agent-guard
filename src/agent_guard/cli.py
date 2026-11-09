@@ -1,4 +1,4 @@
-"""Command line: agent-guard run | check | verify | learn | test | log"""
+"""Command line: agent-guard run | serve | check | verify | learn | test | log"""
 
 from __future__ import annotations
 
@@ -50,6 +50,36 @@ def cmd_run(a) -> int:
         sys.stderr.flush()
     finally:
         os._exit(code)
+
+
+def cmd_serve(a) -> int:
+    try:
+        from .gateway import Gateway, GatewayError, parse_listen, serve, upstream_headers_from_env
+    except ImportError as e:
+        print(f"agent-guard serve needs the http extra: pip install 'agent-guard[http]' ({e.name} is missing)",
+              file=sys.stderr)
+        return 2
+    from .judge import Judge, make_approver
+
+    try:
+        host, port = parse_listen(a.listen)
+        headers = upstream_headers_from_env(a.upstream_header)
+        policy_path = Path(a.policy)
+        policy = Policy.from_file(policy_path)
+        log_path = _audit_path(policy, policy_path, a.log)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        scrub = Scrubber(policy.audit.get("redact"), int(policy.audit.get("max_value_chars", 2000)))
+        with AuditLog(log_path, fsync=bool(policy.audit.get("fsync", False))) as audit:
+            def say(text: str) -> None:
+                if not a.quiet:
+                    print(f"agent-guard: {text}", file=sys.stderr, flush=True)
+
+            judge = Judge(policy, audit, scrub, make_approver(policy.ask), say=say)
+            gateway = Gateway(judge, a.upstream, port, headers, max_body=a.max_body, allow_origins=a.allow_origin)
+            return serve(gateway, host, quiet=a.quiet)
+    except GatewayError as e:
+        print(f"agent-guard serve: {e}", file=sys.stderr)
+        return 2
 
 
 def cmd_check(a) -> int:
@@ -154,6 +184,19 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("-q", "--quiet", action="store_true", help="no stderr line per denied call")
     r.add_argument("command", nargs=argparse.REMAINDER)
     r.set_defaults(fn=cmd_run)
+
+    s = sub.add_parser("serve", help="guard a Streamable HTTP MCP server: agent-guard serve -p guard.yaml --upstream URL")
+    s.add_argument("-p", "--policy", default="guard.yaml")
+    s.add_argument("--upstream", required=True, help="the MCP server's URL, e.g. https://mcp.example.com/mcp")
+    s.add_argument("--listen", default="127.0.0.1:8808", help="loopback HOST:PORT (default 127.0.0.1:8808)")
+    s.add_argument("--upstream-header", action="append", metavar="NAME=ENVVAR",
+                   help="send header NAME to the upstream with the value of environment variable ENVVAR")
+    s.add_argument("--allow-origin", action="append", metavar="ORIGIN",
+                   help="a browser origin allowed besides the gateway's own (default: none)")
+    s.add_argument("--max-body", type=int, default=4 * 1024 * 1024, help="largest request body in bytes (4 MiB)")
+    s.add_argument("--log", help="audit log path (default: policy audit.path, else ~/.local/state/agent-guard/audit.jsonl)")
+    s.add_argument("-q", "--quiet", action="store_true", help="no stderr line per denied call")
+    s.set_defaults(fn=cmd_serve)
 
     c = sub.add_parser("check", help="what would the policy decide for one call? exit 0 allow, 1 deny, 3 ask")
     c.add_argument("-p", "--policy", default="guard.yaml")

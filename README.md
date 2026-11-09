@@ -4,8 +4,10 @@ AI agents call tools that change real things, and the only check between a bad i
 model's own judgement. agent-guard puts rules you can read, review and test in front of those tools, and keeps a
 tamper-evident record of every call.
 
-It is a small proxy for [MCP](https://modelcontextprotocol.io) tool servers. Your client starts agent-guard
-instead of the server; agent-guard starts the server and sits on the pipe between them.
+It is a small proxy for [MCP](https://modelcontextprotocol.io) tool servers. For a local server, your client
+starts agent-guard instead of the server; agent-guard starts the server and sits on the pipe between them. For a
+remote one, `agent-guard serve` is a gateway on localhost in front of its URL (see
+[Remote servers over HTTP](#remote-servers-over-http)).
 
 ```
 agent (MCP client)  <--stdio-->  agent-guard  <--stdio-->  MCP server (files, shell, database, ...)
@@ -26,7 +28,9 @@ agent (MCP client)  <--stdio-->  agent-guard  <--stdio-->  MCP server (files, sh
 - **Tools that can never pass are hidden** from `tools/list`, so the agent does not waste turns on them.
 
 Stdlib Python plus PyYAML. No MCP SDK needed at runtime: MCP over stdio is newline-delimited JSON-RPC, and
-agent-guard only steps in on `tools/call`, so it works with any protocol version the two ends agree on.
+agent-guard only steps in on `tools/call`, so it works with any protocol version the two ends agree on. The HTTP
+gateway needs three more packages (`pip install 'agent-guard[http]'`: Starlette, Uvicorn and HTTPX2, the HTTP
+stack the MCP SDK itself runs on).
 
 ## Try it in under a minute
 
@@ -85,6 +89,47 @@ MCP clients often start servers with a short `PATH`. If `agent-guard` is not fou
 Checked with the official filesystem server (`@modelcontextprotocol/server-filesystem`) driven by the official
 MCP Python SDK client: tools the policy never allows disappear from the list, a write into a read-only folder
 comes back as a tool error, and a write elsewhere goes through.
+
+## Remote servers over HTTP
+
+A server with a URL (Streamable HTTP) gets a gateway instead of a wrapper. It listens on localhost, judges every
+request with the same policy and audit log as `run`, and passes the rest to the server:
+
+```sh
+pip install 'agent-guard[http]'
+export MCP_TOKEN="Bearer ..."            # only if the server wants a key
+agent-guard serve -p guard.yaml --upstream https://mcp.example.com/mcp \
+    --upstream-header Authorization=MCP_TOKEN
+# agent-guard: serving http://127.0.0.1:8808/mcp -> https://mcp.example.com/mcp
+```
+
+Then point the client at `http://127.0.0.1:8808/mcp` instead of the server's URL. It works with both wires the
+official SDK speaks: the 2025 one (`initialize`, a session id, answers as JSON or an SSE stream, a GET stream for
+server messages) and 2026-07-28 (one self-contained POST per request). A denied call is answered by the gateway
+and never sent. Tools the policy never allows are hidden from `tools/list` in JSON and SSE answers alike.
+
+A gateway is a new way in, so it refuses more than the stdio proxy has to:
+
+| Refused | Why |
+|---|---|
+| Listening anywhere but loopback | it has no client authentication, so on a network anyone could use the server (and its key) through it |
+| A `Host` other than its own loopback address, an `Origin` other than its own | DNS rebinding: a web page must not reach it through the browser |
+| A body that is not `application/json`, is compressed, is over 4 MiB, is not strict JSON, or is a batch | what cannot be judged is not forwarded |
+| `Mcp-Method`, `Mcp-Name` or `MCP-Protocol-Version` that disagree with the body, or appear twice | a server routing on the header while the guard judged the body would run a call nobody judged |
+| A redirect from the server | not followed: the request goes where you pointed it, nowhere else |
+| Plain `http://` to anything but loopback, a user or password in the URL | use `https` and `--upstream-header` |
+
+What the server receives is built by the gateway: the body is re-serialised from the parse the policy judged, and
+only MCP's own headers are copied (`Accept`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`,
+`Mcp-Param-*`, `Last-Event-ID`). The client's `Authorization` and cookies are never forwarded; the server's key
+comes from `--upstream-header NAME=ENVVAR`, read from the environment so it is not on the command line, and no
+header value is ever written to the audit log. Each of these refusals has a test that sends the request and then
+checks the server never saw it.
+
+Checked against a real remote server, DeepWiki's public one (`https://mcp.deepwiki.com/mcp`, no key), with the
+official MCP Python SDK client in both handshakes and a policy that denies `ask_question`: the tool disappears
+from the list, a call to it is answered by the gateway, `read_wiki_structure` goes through (0.36 s, the server's
+own time), and `agent-guard verify` reads the log as intact.
 
 ## The policy
 
@@ -211,13 +256,25 @@ directly and once through agent-guard with the example policy and a real audit l
 
 Five runs on an Intel i5-14400F, Python 3.12, with the machine busy (load 3.4). Most of the added time is the two
 extra pipe hops and thread wake-ups, not the checks: the policy is 3.6 us and the audit write about 12 us.
+Over HTTP (`python bench/bench_http.py --calls 2000`, the SDK demo server on 2026-07-28 with JSON answers), the
+gateway adds about 0.7 ms per call: 0.66 to 0.75 ms (median) over five runs on Python 3.13, next to 0.62 to
+0.63 ms for the server's own round trip. That is one more HTTP server and client hop on loopback; against a remote server it is small next to
+the network.
+
 Every call is written to the log before it is forwarded. With fsync off, a crash of agent-guard itself can lose
 at most the result lines of calls still in flight; a power cut can lose the last entries. Turn on
 `audit: {fsync: true}` if that matters more than 0.7 ms per call.
 
 ## Limits
 
-- **Stdio servers only.** Streamable HTTP is not proxied yet.
+- **HTTP: no OAuth through the gateway yet.** A client that discovers OAuth from the URL it is given would ask
+  the gateway, which does not answer it. Servers with no auth or a fixed key (`--upstream-header`) work. The
+  gateway also has no login of its own, which is why it only listens on loopback.
+- **HTTP: `Mcp-Param-*` headers are passed as the client sent them.** They mirror tool arguments the server's
+  schema marks with `x-mcp-header`, and the guard judges the arguments in the body. The spec makes the server
+  reject a header that disagrees with its argument; a server that skips that check and acts on the header could
+  be steered past a rule on that argument.
+- **HTTP: one message per POST.** JSON-RPC batches are refused (the 2025-06-18 revision removed them).
 - **`tools/call` is judged, and `resources/read` with `guard_resources: true`.** Without it resource reads pass
   through untouched; prompts and sampling requests always do.
 - **Patterns, not a sandbox.** A rule on a shell command string is a speed bump: a determined agent can phrase
@@ -239,13 +296,14 @@ at most the result lines of calls still in flight; a power cut can lose the last
 ## Development
 
 ```sh
-pip install -e '.[test,sdk]'
-pytest -q                      # 102 tests
+pip install -e '.[test,sdk,http]'
+pytest -q                      # 132 tests
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on
 both sides, in both handshakes: `initialize` (2025 protocol versions) and `server/discover` (2026-07-28, where
-every result must carry `resultType`). CI runs the tests, the example policy's regression cases and a short
+every result must carry `resultType`), over stdio and through the HTTP gateway (SSE and JSON answers). CI
+runs the tests, the example policy's regression cases and a short
 benchmark on Python 3.10, 3.12 and 3.13.
 
 Built with AI pair programming.
