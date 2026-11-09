@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
@@ -365,12 +366,15 @@ class Proxy:
         """One decision for several readings of the same request: any deny wins, then any ask; allow needs them all.
         Judged without charging rate rules, then an allow is charged once."""
         decisions = [self.policy.evaluate(name, r, charge=False) for r in readings]
+        # Every rate rule any reading counted against, once each, so no reading can be used to skip a limit.
+        charge = tuple({id(rule): rule for d in decisions for rule in d.charge}.values())
         for action in ("deny", "ask"):
             for d in decisions:
                 if d.action == action:
-                    return d
-        self.policy.charge(decisions[0])
-        return decisions[0]
+                    return replace(d, charge=charge)
+        allowed = replace(decisions[0], charge=charge)
+        self.policy.charge(allowed)
+        return allowed
 
     def _track(self, msg_id: Any, has_id: bool, name: str) -> None:
         if has_id:

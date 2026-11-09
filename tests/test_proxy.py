@@ -369,3 +369,15 @@ def test_deny_rules_see_every_reading_of_a_uri(tmp_path):
             assert r.get("error", {}).get("code") == -32001, (uri, r)
     finally:
         s.close()
+
+
+def test_a_rate_rule_counts_a_read_whichever_reading_it_matched(tmp_path):
+    # "EVIL.example" only matches the rule in its lowercased reading; the read must still count against it.
+    policy = "default: allow\nguard_resources: true\nrules:\n" \
+             '  - {name: few, tool: "resources/read", args: {host: evil.example}, rate: 2/minute, decision: deny}\n'
+    s = _open(tmp_path, policy)
+    try:
+        got = [s.request("resources/read", {"uri": f"https://EVIL.example/{i}"}) for i in range(3)]
+        assert [r.get("error", {}).get("code") for r in got] == [-32002, -32002, -32001]  # forwarded twice, then refused
+    finally:
+        s.close()
