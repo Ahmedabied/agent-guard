@@ -85,7 +85,9 @@ def _parse_match(items: list[str]) -> dict[str, str]:
 
 def cmd_learn(a) -> int:
     if a.seq is not None:
-        incident = incident_from_log(a.from_log, a.seq)
+        policy_path = Path(a.policy)
+        log = a.from_log or _audit_path(Policy.from_file(policy_path), policy_path, None)
+        incident = incident_from_log(log, a.seq)
     elif a.tool:
         try:
             args = json.loads(a.args) if a.args else {}
@@ -167,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     l = sub.add_parser("learn", help="turn an incident into a deny rule plus a regression test")
     l.add_argument("-p", "--policy", default="guard.yaml")
     l.add_argument("--tests", default="guard-tests.yaml")
-    l.add_argument("--from-log", default=str(_default_log()))
+    l.add_argument("--from-log", help="audit log to read --seq from (default: the policy's audit.path)")
     l.add_argument("--seq", type=int, help="the audit log entry of the incident")
     l.add_argument("--tool", help="or describe the incident: the tool name")
     l.add_argument("--args", help="and its arguments as a JSON object")
