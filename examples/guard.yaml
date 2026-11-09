@@ -1,0 +1,38 @@
+# agent-guard policy for the demo file server.
+# Rules are checked top to bottom; the first one that matches decides.
+version: 1
+default: deny              # anything not listed below is blocked
+hide_denied_tools: true    # tools that can never pass are removed from tools/list
+
+ask:
+  via: tty                 # ask on the terminal; with no terminal, an ask is a deny
+  timeout: 60
+
+audit:
+  path: audit.jsonl        # relative to this file
+  max_value_chars: 2000
+
+rules:
+  - name: notes-are-read-only
+    tool: [write_file, delete_file]
+    args:
+      path: {under: /tmp/agent-guard-demo/notes}
+    decision: deny
+    reason: notes are read-only for agents
+
+  - name: delete-only-in-scratch
+    tool: delete_file
+    args:
+      path: {not_under: /tmp/agent-guard-demo/scratch}
+    decision: deny
+    reason: deletes are allowed only inside scratch/
+
+  - name: write-burst
+    tool: write_file
+    rate: 20/minute
+    decision: deny
+    reason: more than 20 writes a minute looks like a loop
+
+  - name: file-work
+    tool: [list_files, read_file, write_file, delete_file, echo]
+    decision: allow

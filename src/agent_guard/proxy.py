@@ -1,0 +1,361 @@
+"""The proxy: an MCP stdio server that wraps another one.
+
+The client (the agent's host app) talks to the proxy on stdin and stdout. The proxy starts the
+real server as a child process and copies every message both ways untouched, except
+"tools/call" requests, which go through the policy first. A denied call never reaches the
+server: the client gets a normal tool result with isError set and the reason, so the agent can
+read it and change course instead of crashing.
+
+MCP over stdio is newline-delimited JSON-RPC, so this needs no MCP SDK and does not care which
+protocol version the two ends agree on.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import select
+import subprocess
+import sys
+import threading
+import time
+from typing import Any, Callable
+
+from .audit import AuditError, AuditLog, Scrubber
+from .policy import Decision, Policy
+
+Approver = Callable[[str, Any, Decision], "tuple[bool, str]"]
+
+
+def _key(msg_id: Any) -> str:
+    return json.dumps(msg_id, sort_keys=True)
+
+
+def _line(obj: Any) -> bytes:
+    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
+
+
+class DenyApprover:
+    def __call__(self, tool: str, args: Any, decision: Decision) -> tuple[bool, str]:
+        return False, "nobody to ask (ask.via is deny)"
+
+
+class TtyApprover:
+    """Asks on the terminal the proxy was started from. MCP clients usually start servers
+    without a terminal; then every ask is denied, which is the safe answer."""
+
+    def __init__(self, timeout: float = 60):
+        self.timeout = timeout
+        self._lock = threading.Lock()
+
+    def __call__(self, tool: str, args: Any, decision: Decision) -> tuple[bool, str]:
+        with self._lock:
+            try:
+                fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+            except OSError:
+                return False, "no terminal to ask on"
+            with os.fdopen(fd, "r+b", buffering=0) as tty:
+                shown = json.dumps(args, ensure_ascii=False)
+                if len(shown) > 500:
+                    shown = shown[:500] + "..."
+                tty.write(f"\nagent-guard: {tool} {shown}\n  rule {decision.rule}: {decision.reason}\n"
+                          f"  allow this call? [y/N] ".encode())
+                ready, _, _ = select.select([tty], [], [], self.timeout)
+                if not ready:
+                    tty.write(b"\n  no answer, denied\n")
+                    return False, f"no answer on the terminal in {self.timeout:g}s"
+                answer = tty.readline().strip().lower()
+                if answer in (b"y", b"yes"):
+                    return True, "approved on the terminal"
+                return False, "refused on the terminal"
+
+
+class CommandApprover:
+    """Runs a command with the call as JSON on stdin. Exit code 0 approves."""
+
+    def __init__(self, command: list[str], timeout: float = 60):
+        self.command = command
+        self.timeout = timeout
+
+    def __call__(self, tool: str, args: Any, decision: Decision) -> tuple[bool, str]:
+        payload = json.dumps({"tool": tool, "arguments": args, "rule": decision.rule, "reason": decision.reason})
+        try:
+            r = subprocess.run(self.command, input=payload.encode(), capture_output=True, timeout=self.timeout)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, f"approver command failed: {e.__class__.__name__}"
+        return (r.returncode == 0), f"approver command exit {r.returncode}"
+
+
+def make_approver(cfg: dict) -> Approver:
+    via = cfg.get("via", "tty")
+    timeout = float(cfg.get("timeout", 60))
+    if via == "deny":
+        return DenyApprover()
+    if via == "command":
+        cmd = cfg.get("command")
+        if isinstance(cmd, str):
+            cmd = [cmd]
+        if not cmd or not all(isinstance(c, str) for c in cmd):
+            raise ValueError("ask.command must be a command line (a list of strings)")
+        return CommandApprover(cmd, timeout)
+    if via == "tty":
+        return TtyApprover(timeout)
+    raise ValueError(f"ask.via must be tty, command or deny, got {via!r}")
+
+
+class Proxy:
+    def __init__(
+        self,
+        policy: Policy,
+        command: list[str],
+        audit: AuditLog | None = None,
+        scrub: Scrubber | None = None,
+        approver: Approver | None = None,
+        client_in=None,
+        client_out=None,
+        quiet: bool = False,
+    ):
+        self.policy = policy
+        self.command = command
+        self.audit = audit
+        self.scrub = scrub or Scrubber()
+        self.approver = approver or make_approver(policy.ask)
+        self.client_in = client_in or sys.stdin.buffer
+        self.client_out = client_out or sys.stdout.buffer
+        self.quiet = quiet
+        self.proc: subprocess.Popen | None = None
+        self._out_lock = threading.Lock()
+        self._srv_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._pending: dict[str, tuple[Any, str, int]] = {}
+        self._list_ids: set[str] = set()
+        self._done = threading.Event()
+        self.stats = {"allowed": 0, "denied": 0, "asked": 0}
+
+    # ---- plumbing -------------------------------------------------------------------------
+
+    def _to_client(self, data: bytes) -> None:
+        with self._out_lock:
+            try:
+                self.client_out.write(data)
+                self.client_out.flush()
+            except (BrokenPipeError, ValueError, OSError):
+                self._done.set()
+
+    def _to_server(self, data: bytes) -> None:
+        with self._srv_lock:
+            try:
+                self.proc.stdin.write(data if data.endswith(b"\n") else data + b"\n")
+                self.proc.stdin.flush()
+            except (BrokenPipeError, ValueError, OSError):
+                self._done.set()
+
+    def _say(self, text: str) -> None:
+        if not self.quiet:
+            print(f"agent-guard: {text}", file=sys.stderr, flush=True)
+
+    def _log(self, record: dict) -> bool:
+        if self.audit is None:
+            return True
+        try:
+            self.audit.append(record)
+            return True
+        except (AuditError, OSError) as e:
+            self._say(f"audit log write failed: {e}")
+            return False
+
+    # ---- client to server -----------------------------------------------------------------
+
+    def _pump_client(self) -> None:
+        try:
+            for raw in iter(self.client_in.readline, b""):
+                if not raw.strip():
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except ValueError:
+                    self._to_server(raw)  # not ours to judge; the server answers parse errors
+                    continue
+                if isinstance(msg, list):
+                    self._batch(msg)
+                elif isinstance(msg, dict):
+                    self._message(msg, raw)
+                else:
+                    self._to_server(raw)
+        finally:
+            self._done.set()
+
+    def _message(self, msg: dict, raw: bytes) -> None:
+        method = msg.get("method")
+        if method == "tools/call":
+            if self._call(msg):
+                self._to_server(raw)
+        else:
+            if method == "tools/list" and "id" in msg and self.policy.hide_denied_tools:
+                with self._state_lock:
+                    self._list_ids.add(_key(msg["id"]))
+            self._to_server(raw)
+
+    def _batch(self, items: list) -> None:
+        keep = []
+        for item in items:
+            if isinstance(item, dict) and item.get("method") == "tools/call":
+                if self._call(item):
+                    keep.append(item)
+            else:
+                if isinstance(item, dict) and item.get("method") == "tools/list" and "id" in item \
+                        and self.policy.hide_denied_tools:
+                    with self._state_lock:
+                        self._list_ids.add(_key(item["id"]))
+                keep.append(item)
+        if keep:
+            self._to_server(_line(keep))
+
+    def _call(self, msg: dict) -> bool:
+        """Judge one tools/call. True means forward it now."""
+        t0 = time.perf_counter_ns()
+        msg_id = msg.get("id")
+        has_id = "id" in msg
+        params = msg.get("params")
+        name = params.get("name") if isinstance(params, dict) else None
+        args = params.get("arguments") if isinstance(params, dict) else None
+        if not isinstance(name, str) or (args is not None and not isinstance(args, dict)):
+            self._log({"event": "call", "id": msg_id, "tool": name if isinstance(name, str) else None,
+                       "decision": "deny", "rule": "malformed", "reason": "tools/call without a name or with non-object arguments"})
+            self.stats["denied"] += 1
+            if has_id:
+                self._to_client(_line({"jsonrpc": "2.0", "id": msg_id, "error": {
+                    "code": -32602, "message": "agent-guard: tools/call needs a string name and object arguments"}}))
+            return False
+        decision = self.policy.evaluate(name, args)
+        eval_us = (time.perf_counter_ns() - t0) // 1000
+        logged = self._log({"event": "call", "id": msg_id, "tool": name, "args": self.scrub(args or {}),
+                            "decision": decision.action, "rule": decision.rule, "reason": decision.reason,
+                            "eval_us": eval_us})
+        if not logged:  # no audit trail, no tool call
+            decision = Decision("deny", "audit-unavailable", "the audit log could not be written")
+        if decision.action == "allow":
+            self.stats["allowed"] += 1
+            self._track(msg_id, has_id, name)
+            return True
+        if decision.action == "deny":
+            self.stats["denied"] += 1
+            self._say(f"denied {name} (rule {decision.rule}): {decision.reason}")
+            if has_id:
+                self._blocked(msg_id, name, decision.rule, decision.reason)
+            return False
+        self.stats["asked"] += 1
+        threading.Thread(target=self._ask, args=(msg, name, args, decision), daemon=True).start()
+        return False
+
+    def _track(self, msg_id: Any, has_id: bool, name: str) -> None:
+        if has_id:
+            with self._state_lock:
+                self._pending[_key(msg_id)] = (msg_id, name, time.perf_counter_ns())
+
+    def _blocked(self, msg_id: Any, name: str, rule: str, reason: str) -> None:
+        text = f"agent-guard blocked this call to {name}: {reason} (rule: {rule})"
+        self._to_client(_line({"jsonrpc": "2.0", "id": msg_id,
+                               "result": {"content": [{"type": "text", "text": text}], "isError": True}}))
+
+    def _ask(self, msg: dict, name: str, args: Any, decision: Decision) -> None:
+        try:
+            ok, how = self.approver(name, args, decision)
+        except Exception as e:  # an approver bug must not let a call through
+            ok, how = False, f"approver error: {e.__class__.__name__}"
+        msg_id = msg.get("id")
+        if not self._log({"event": "approval", "id": msg_id, "tool": name, "approved": ok, "how": how}):
+            ok, how = False, "the audit log could not be written"
+        if ok:
+            self.policy.charge(decision)
+            self._track(msg_id, "id" in msg, name)
+            self._to_server(_line(msg))
+        else:
+            self._say(f"denied {name} after ask: {how}")
+            if "id" in msg:
+                self._blocked(msg_id, name, decision.rule, f"needs approval and was not approved ({how})")
+
+    # ---- server to client -----------------------------------------------------------------
+
+    def _pump_server(self) -> None:
+        try:
+            for raw in iter(self.proc.stdout.readline, b""):
+                done: list = []
+                if self._pending or self._list_ids:
+                    raw, done = self._inspect(raw)
+                self._to_client(raw)
+                for (msg_id, name, t0), item in done:  # logged after forwarding: off the hot path
+                    res = item.get("result")
+                    ok = "error" not in item and not (isinstance(res, dict) and res.get("isError") is True)
+                    us = (time.perf_counter_ns() - t0) // 1000
+                    self._log({"event": "result", "id": msg_id, "tool": name, "ok": ok, "us": us})
+        finally:
+            self._fail_pending()
+            self._done.set()
+
+    def _inspect(self, raw: bytes) -> tuple[bytes, list]:
+        try:
+            msg = json.loads(raw)
+        except ValueError:
+            return raw, []
+        items = msg if isinstance(msg, list) else [msg]
+        changed = False
+        done = []
+        for item in items:
+            if not isinstance(item, dict) or "method" in item or "id" not in item:
+                continue
+            k = _key(item["id"])
+            with self._state_lock:
+                entry = self._pending.pop(k, None)
+                is_list = k in self._list_ids
+                self._list_ids.discard(k)
+            if entry is not None:
+                done.append((entry, item))
+            elif is_list:
+                changed |= self._filter_tools(item)
+        if changed:
+            raw = _line(msg)
+        return raw, done
+
+    def _filter_tools(self, item: dict) -> bool:
+        res = item.get("result")
+        if not isinstance(res, dict) or not isinstance(res.get("tools"), list):
+            return False
+        before = res["tools"]
+        res["tools"] = [t for t in before if not (isinstance(t, dict) and isinstance(t.get("name"), str)
+                                                   and self.policy.always_denied(t["name"]))]
+        return len(res["tools"]) != len(before)
+
+    def _fail_pending(self) -> None:
+        with self._state_lock:
+            pending = list(self._pending.values())
+            self._pending.clear()
+        for msg_id, name, _ in pending:
+            self._log({"event": "result", "id": msg_id, "tool": name, "ok": False, "us": 0, "error": "server exited"})
+            self._to_client(_line({"jsonrpc": "2.0", "id": msg_id, "error": {
+                "code": -32603, "message": "agent-guard: the tool server exited before answering"}}))
+
+    # ---- lifecycle ------------------------------------------------------------------------
+
+    def run(self) -> int:
+        self.proc = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
+        threads = [threading.Thread(target=self._pump_server, daemon=True),
+                   threading.Thread(target=self._pump_client, daemon=True)]
+        for t in threads:
+            t.start()
+        self._done.wait()
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            code = self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.proc.terminate()
+            try:
+                code = self.proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                code = self.proc.wait()
+        threads[0].join(timeout=2)
+        return code if code and code > 0 else 0
