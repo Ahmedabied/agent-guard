@@ -10,10 +10,11 @@ remote one, `agent-guard serve` is a gateway on localhost in front of its URL (s
 [Remote servers over HTTP](#remote-servers-over-http)).
 
 ```
-agent (MCP client)  <--stdio-->  agent-guard  <--stdio-->  MCP server (files, shell, database, ...)
-                                     |
-                         guard.yaml      audit.jsonl
-                         (rules)         (hash-chained)
+agent (MCP client)  <--stdio-->  agent-guard run    <--stdio-->  MCP server (files, shell, database, ...)
+agent (MCP client)  <--HTTP--->  agent-guard serve  <--HTTPS-->  remote MCP server
+                                        |
+                            guard.yaml      audit.jsonl
+                            (rules)         (hash-chained)
 ```
 
 - **Rules as code.** A YAML file says allow, deny or ask for each call, by tool name, argument patterns and rate.
@@ -26,6 +27,11 @@ agent (MCP client)  <--stdio-->  agent-guard  <--stdio-->  MCP server (files, sh
 - **A mistake happens once.** `agent-guard learn` turns an incident from the log into a new rule plus a
   regression test. `agent-guard test` replays those tests in CI, so nobody can quietly loosen the policy later.
 - **Tools that can never pass are hidden** from `tools/list`, so the agent does not waste turns on them.
+- **Local and remote servers.** Over stdio, or as a gateway in front of a Streamable HTTP server, on both MCP wires
+  (2025 sessions and 2026-07-28). Checked in CI with the official Python and TypeScript SDK clients, and by hand
+  against a public server.
+- **Decisions in your traces.** With an OTLP endpoint set, each decision is an OpenTelemetry span inside the
+  agent's own trace, so a blocked call is visible where you already look ([screenshot](#traces)).
 
 Stdlib Python plus PyYAML. No MCP SDK needed at runtime: MCP over stdio is newline-delimited JSON-RPC, and
 agent-guard only steps in on `tools/call`, so it works with any protocol version the two ends agree on. The HTTP
