@@ -378,6 +378,21 @@ def test_prompts_go_through_the_policy_when_guarded(tmp_path):
     assert [e for e in events if e["event"] == "result" and e.get("tool") == "prompts/get"][0]["ok"] is True
 
 
+def test_secret_prompt_arguments_are_scrubbed_in_the_log(tmp_path):
+    # A prompt's arguments sit one level down, under "arguments": the scrubber must reach them there too.
+    s = _open(tmp_path, PROMPT_POLICY)
+    try:
+        token = "ghp_" + "a" * 36
+        r = s.request("prompts/get", {"name": "summarize", "arguments": {"api_key": "hunter2", "note": token}})
+        assert "result" in r
+    finally:
+        s.close()
+    text = s.log.read_text()
+    assert "hunter2" not in text and token not in text
+    call = [json.loads(line) for line in text.splitlines() if '"prompts/get"' in line][0]
+    assert call["args"]["arguments"] == {"api_key": "[redacted]", "note": "[redacted: looks like a secret]"}
+
+
 def test_prompts_pass_through_unless_guard_prompts_is_set(tmp_path):
     s = _open(tmp_path, POLICY)
     try:
