@@ -426,3 +426,33 @@ def test_resources_read_is_judged_over_http(rig, modern):
     assert sneaky.json()["error"]["code"] == -32001 and "secrets stay put" in sneaky.json()["error"]["message"]
     assert other.json()["error"]["code"] == -32001
     assert [json.loads(q["body"])["params"]["uri"] for q in r.upstream_requests()] == ["file:///srv/docs/a.md"]
+
+
+# ---- many long-lived streams --------------------------------------------------------------------------------------
+
+def test_open_server_streams_never_starve_calls_and_close_with_their_clients(rig):
+    """Every 2025 session keeps a GET stream open for server messages. 120 of them (more than an HTTP client's
+    usual pool of 100) must not hold up a call, and must be closed upstream when their clients go."""
+    r = rig(mode="hold")
+    gateway = r.procs[1].pid
+    fds = lambda: len(os.listdir(f"/proc/{gateway}/fd"))  # noqa: E731
+    assert r.post(CALL).status_code == 200
+    baseline = fds()
+    clients = []
+    for _ in range(120):
+        s = socket.create_connection(("127.0.0.1", r.port))
+        s.sendall(f"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1:{r.port}\r\nAccept: text/event-stream\r\n\r\n".encode())
+        clients.append(s)
+    for s in clients:  # each stream is open end to end
+        s.settimeout(10)
+        assert s.recv(15) == b"HTTP/1.1 200 OK"
+    t0 = time.perf_counter()
+    assert r.post({**CALL, "id": 2}).status_code == 200
+    assert time.perf_counter() - t0 < 2
+    for s in clients:
+        s.close()
+    for _ in range(100):
+        if fds() <= baseline + 2:
+            break
+        time.sleep(0.1)
+    assert fds() <= baseline + 2

@@ -150,6 +150,10 @@ comes from `--upstream-header NAME=ENVVAR`, read from the environment so it is n
 header value is ever written to the audit log. Each of these refusals has a test that sends the request and then
 checks the server never saw it.
 
+Long sessions are fine: each 2025 session keeps a stream open for server messages, and with 600 of them open
+through one gateway a call still answered in 3 ms; when their clients went away, every upstream connection closed
+with them (file descriptors back to the baseline). 150 SDK sessions in a row leave nothing behind.
+
 CI runs the official TypeScript SDK clients through the gateway too, v1 (`@modelcontextprotocol/sdk` 1.32) and v2
 (`@modelcontextprotocol/client` 2.4) in both handshakes, against a server answering with SSE and with JSON: the
 same hidden tool, allowed read and two blocked calls, plus a 2026-07-28 call whose `Mcp-Param` headers the server
@@ -308,7 +312,8 @@ at most the result lines of calls still in flight; a power cut can lose the last
   `rm` in ways a regex will not catch. `under` is lexical and does not follow symlinks, because the guard may not
   share a filesystem with the server. Pair agent-guard with server-side limits (allowed folders, read-only users,
   containers) and use it for policy, approval and the record.
-- **Rate limits live in memory**, per agent-guard process. Restarting resets them.
+- **Rate limits live in memory**, per agent-guard process. Restarting resets them. Behind `serve` that means one
+  count, and one audit log, for every client and session the gateway serves.
 - **The audit chain has no key.** Anyone who can write the file can rewrite it and recompute every hash, and
   `verify` will say ok. Deleting the file or cutting lines from the end is the same. The chain catches accidents
   and careless edits; against a writer who means it, keep the head hash (`--expect-head`) on another machine.
@@ -324,7 +329,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk,http]'
-pytest -q                      # 172 tests (6 need node)
+pytest -q                      # 173 tests (6 need node)
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

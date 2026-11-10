@@ -168,6 +168,9 @@ class Gateway:
         self.client = httpx2.AsyncClient(
             follow_redirects=False,
             timeout=httpx2.Timeout(connect=connect_timeout, read=None, write=30, pool=connect_timeout),
+            # No cap on upstream connections: each one serves one client request, and server-message streams stay
+            # open for a whole session. A cap (HTTP clients default to 100) would let open streams starve calls.
+            limits=httpx2.Limits(max_connections=None, max_keepalive_connections=20),
         )
         self.param_maps: dict[str, dict] = {}  # tool name -> argument path -> Mcp-Param header token
         self._missed: dict[str, float] = {}  # tool name -> when the server last did not list it
@@ -458,9 +461,26 @@ def upstream_headers_from_env(items: list[str]) -> dict[str, str]:
     return out
 
 
+def raise_open_file_limit() -> None:
+    """Each open stream costs two file descriptors (client side and server side); the usual soft limit of 1,024
+    would stop accepting connections at about 500 sessions, so lift it to the hard limit where allowed."""
+    try:
+        import resource
+    except ImportError:  # not on Windows
+        return
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = hard if hard != resource.RLIM_INFINITY else 65536
+    if soft != resource.RLIM_INFINITY and soft < want:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+        except (ValueError, OSError):
+            pass
+
+
 def serve(gateway: Gateway, host: str, quiet: bool = False) -> int:
     import uvicorn
 
+    raise_open_file_limit()
     if not quiet:
         print(f"agent-guard: serving http://{host}:{gateway.port}{PATH} -> {gateway.upstream}", file=sys.stderr,
               flush=True)

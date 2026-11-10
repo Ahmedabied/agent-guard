@@ -1,16 +1,17 @@
 """A tiny Streamable HTTP MCP server that records every request it gets, for the gateway tests.
 
 python fake_upstream.py PORT LOG. The path picks the answer: /json answers with JSON, /sse with an SSE stream that
-sends a notification before the result, /redirect answers 307 to /json.
+sends a notification before the result, /redirect answers 307 to /json, /hold keeps a GET stream open and silent.
 """
 
 import json
 import sys
 
+import anyio
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
 PORT, LOG = int(sys.argv[1]), sys.argv[2]
@@ -24,6 +25,12 @@ async def handle(request: Request) -> Response:
     mode = request.path_params["mode"]
     if mode == "redirect":
         return Response(status_code=307, headers={"location": f"http://127.0.0.1:{PORT}/json"})
+    if request.method == "GET" and mode == "hold":  # a server-message stream that stays open and says nothing
+        async def quiet():
+            yield b": open\n\n"
+            await anyio.sleep_forever()
+
+        return StreamingResponse(quiet(), media_type="text/event-stream")
     if request.method != "POST":
         return Response(status_code=405)
     msg = json.loads(body)
