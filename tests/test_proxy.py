@@ -345,6 +345,62 @@ def test_resource_reads_pass_through_unless_guard_resources_is_set(tmp_path):
         s.close()
 
 
+PROMPT_POLICY = POLICY.replace("hide_denied_tools: true\n", "hide_denied_tools: true\nguard_prompts: true\n") + \
+    '  - {name: no-scratch-prompts, tool: "prompts/get", args: {arguments.file: {under: ROOT/scratch}}, ' \
+    'decision: deny}\n' \
+    '  - {name: summarize, tool: "prompts/get", args: {name: summarize}, decision: allow}\n'
+
+
+def test_prompts_go_through_the_policy_when_guarded(tmp_path):
+    s = _open(tmp_path, PROMPT_POLICY)
+    try:
+        ok = s.request("prompts/get", {"name": "summarize", "arguments": {"file": s.path("notes/plan.md")}})
+        assert ok["result"]["messages"][0]["content"]["text"].startswith("prompt summarize with")
+        for params in ({"name": "leak_env"},                                           # no rule allows it
+                       {"name": "summarize", "arguments": {"file": s.path("scratch/old.txt")}},  # a deny rule's args
+                       {"name": "leak_env", "arguments": {"name": "summarize"}}):      # an argument is not the name
+            r = s.request("prompts/get", params)
+            assert r["error"]["code"] == -32001, (params, r)
+            assert r["error"]["message"].startswith(f"agent-guard blocked the prompt {params['name']}:")
+        for params in ({"name": 5}, {"name": "summarize", "arguments": "file"}, None):
+            r = s.request("prompts/get", params)
+            assert r["error"]["code"] == -32602 and "needs a string name" in r["error"]["message"], (params, r)
+        # A notification is judged the same way and, denied, gets no answer: the next answer is the ping's.
+        s.send({"jsonrpc": "2.0", "method": "prompts/get", "params": {"name": "leak_env"}})
+        assert s.request("ping")["result"] == {}
+    finally:
+        s.close()
+    events = [json.loads(line) for line in s.log.read_text().splitlines()]
+    calls = [e for e in events if e.get("tool") == "prompts/get" and e["event"] == "call"]
+    assert [e["decision"] for e in calls] == ["allow"] + ["deny"] * 7
+    assert calls[0]["args"]["name"] == "summarize" and calls[3]["rule"] == "default"
+    assert [e["rule"] for e in calls[1:3]] == ["default", "no-scratch-prompts"]
+    assert [e for e in events if e["event"] == "result" and e.get("tool") == "prompts/get"][0]["ok"] is True
+
+
+def test_prompts_pass_through_unless_guard_prompts_is_set(tmp_path):
+    s = _open(tmp_path, POLICY)
+    try:
+        r = s.request("prompts/get", {"name": "leak_env"})
+        assert r["result"]["messages"][0]["content"]["text"] == "prompt leak_env with {}"  # off by default
+    finally:
+        s.close()
+    assert not [e for e in map(json.loads, s.log.read_text().splitlines()) if e.get("tool") == "prompts/get"]
+
+
+def test_a_tool_cannot_take_the_name_of_a_guarded_request(tmp_path):
+    # Rules on "prompts/get" and "resources/read" are written for those requests; a tool by that name is refused
+    # even where everything else is allowed, so such a rule never judges a tool call.
+    s = _open(tmp_path, "default: allow\nrules: []\n")
+    try:
+        for name in ("prompts/get", "resources/read"):
+            r = s.call(name, uri="file:///etc/passwd")
+            assert r["result"]["isError"] is True and "(rule: reserved)" in r["result"]["content"][0]["text"]
+        assert s.call("echo", text="hi")["result"]["isError"] is False
+    finally:
+        s.close()
+
+
 DENY_POLICY = """
 default: allow
 guard_resources: true

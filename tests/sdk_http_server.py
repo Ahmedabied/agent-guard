@@ -29,6 +29,18 @@ def drop_database(name: str) -> str:
     return f"dropped {name}"
 
 
+@server.prompt()
+def review(code: str) -> str:
+    """A prompt with one argument."""
+    return f"review this: {code}"
+
+
+@server.prompt()
+def leak_env() -> str:
+    """A prompt the test policy denies."""
+    return "never reachable"
+
+
 @server.tool()
 def forecast(region: Annotated[str, Field(json_schema_extra={"x-mcp-header": "Region"})],
              days: Annotated[int, Field(json_schema_extra={"x-mcp-header": "Days"})] = 1) -> str:

@@ -81,6 +81,23 @@ def test_learn_exact_values_by_default_and_skips_redacted(tmp_path):
     assert rule["args"] == {"path": {"equals": "/srv/prod.db"}, "force": {"equals": True}}
 
 
+def test_learn_from_a_prompt_line(tmp_path):
+    # A prompts/get line (guard_prompts: true) learns a rule on the prompt's name; its arguments, an object, are
+    # left out of the exact match, and the regression case replays the whole request.
+    policy, tests, log = tmp_path / "guard.yaml", tmp_path / "t.yaml", tmp_path / "audit.jsonl"
+    policy.write_text(POLICY.replace("default: deny\n", "default: deny\nguard_prompts: true\n") +
+                      "  - {name: prompts, tool: prompts/get, decision: allow}\n")
+    with AuditLog(log) as a:
+        a.append({"event": "call", "id": 1, "tool": "prompts/get", "decision": "allow",
+                  "args": {"name": "dump_env", "arguments": {"scope": "all"}}})
+    rule = learn(policy, tests, incident_from_log(log, 1), "no-env-prompt", "prompts never show the environment")
+    assert rule["tool"] == "prompts/get" and rule["args"] == {"name": {"equals": "dump_env"}}
+    p = Policy.from_file(policy)
+    assert p.evaluate("prompts/get", {"name": "dump_env"}).rule == "no-env-prompt"
+    assert p.evaluate("prompts/get", {"name": "review", "arguments": {"name": "dump_env"}}).action == "allow"
+    assert run_cases(policy, load_cases(tests)) == []
+
+
 def test_learn_refuses_a_rule_that_misses_the_incident(tmp_path):
     policy = tmp_path / "guard.yaml"
     policy.write_text(POLICY)

@@ -428,6 +428,58 @@ def test_resources_read_is_judged_over_http(rig, modern):
     assert [json.loads(q["body"])["params"]["uri"] for q in r.upstream_requests()] == ["file:///srv/docs/a.md"]
 
 
+PROMPT_POLICY = """
+default: allow
+guard_prompts: true
+rules:
+  - {name: no-env, tool: prompts/get, args: {name: leak_env}, decision: deny, reason: no environment in prompts}
+"""
+
+
+@pytest.mark.parametrize("answers", ["sse", "json"])
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+def test_sdk_prompts_are_judged_over_http(rig, mode, answers):
+    pytest.importorskip("mcp")
+    from mcp.client.client import Client
+    from mcp.shared.exceptions import MCPError
+
+    r = rig(upstream="sdk", mode=answers, policy=PROMPT_POLICY)
+    seen = {}
+
+    async def session():
+        async with Client(r.url, mode=mode) as c:
+            seen["review"] = await c.get_prompt("review", {"code": "x = 1"})
+            try:
+                await c.get_prompt("leak_env")
+            except MCPError as e:
+                seen["leak"] = e
+
+    anyio.run(session)
+    assert seen["review"].messages[0].content.text == "review this: x = 1"
+    assert seen["leak"].error.code == -32001 and "no environment in prompts" in seen["leak"].error.message
+    events = [(e["event"], e.get("tool"), e.get("decision", e.get("ok"))) for e in r.audit_entries()]
+    assert events == [("call", "prompts/get", "allow"), ("result", "prompts/get", True),
+                      ("call", "prompts/get", "deny")]
+    assert verify(r.audit).ok
+
+
+def test_a_modern_prompts_get_is_sent_once_with_no_mcp_param_headers(rig):
+    # Mcp-Param headers belong to tools/call: a prompt named like a tool must not cause a tools/list lookup or carry
+    # that tool's headers, and a client's own copies are dropped as always.
+    r = rig(policy=PROMPT_POLICY)
+    headers = {"mcp-protocol-version": "2026-07-28", "mcp-method": "prompts/get", "mcp-name": "forecast",
+               "mcp-param-region": "eu"}
+    body = {"jsonrpc": "2.0", "id": 7, "method": "prompts/get",
+            "params": {"name": "forecast", "arguments": {"region": "us"}, "_meta": META}}
+    assert r.post(body, headers=headers).status_code == 200
+    denied = {**body, "id": 8, "params": {**body["params"], "name": "leak_env"}}
+    reply = r.post(denied, headers={**headers, "mcp-name": "leak_env"})
+    assert reply.json()["error"]["code"] == -32001
+    sent = r.upstream_requests()
+    assert [json.loads(q["body"])["method"] for q in sent] == ["prompts/get"]  # no lookup, not the denied one
+    assert not [k for k, _ in sent[0]["headers"] if k.lower().startswith("mcp-param-")]
+
+
 # ---- many long-lived streams --------------------------------------------------------------------------------------
 
 def test_open_server_streams_never_starve_calls_and_close_with_their_clients(rig):

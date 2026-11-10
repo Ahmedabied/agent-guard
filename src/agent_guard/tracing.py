@@ -2,13 +2,14 @@
 
 Off unless the standard OTLP setting is in the environment (OTEL_EXPORTER_OTLP_ENDPOINT or
 OTEL_EXPORTER_OTLP_TRACES_ENDPOINT). Then every judged call gets one span, `agent-guard tools/call <tool>`, with
-the decision and the rule. Its parent is the trace context the client put in the request's `_meta` (MCP's W3C
+the decision and the rule (`agent-guard resources/read` and `agent-guard prompts/get` for those, without the
+uri or the prompt's name). Its parent is the trace context the client put in the request's `_meta` (MCP's W3C
 `traceparent`), so in the agent's own trace a blocked call shows the guard's span and no server span.
 
 What a span carries: the method, tool name, decision, rule, the reason written in the policy (never one built from
-the request) and the request id. Never the arguments or a resource uri: those can hold anything, and the audit log's scrubber does not reach a tracing
-backend. Recording a span happens after the decision, and any error in it is swallowed, so tracing can neither
-change a decision nor fail one.
+the request) and the request id. Never the arguments, a resource uri or a prompt's name: those can hold anything,
+and the audit log's scrubber does not reach a tracing backend. Recording a span happens after the decision, and
+any error in it is swallowed, so tracing can neither change a decision nor fail one.
 """
 
 from __future__ import annotations

@@ -22,7 +22,8 @@ import yaml
 ACTIONS = ("allow", "deny", "ask")
 OPERATORS = ("glob", "regex", "not_glob", "not_regex", "equals", "contains", "under", "not_under")
 RULE_KEYS = {"name", "tool", "args", "rate", "decision", "reason"}
-TOP_KEYS = {"version", "default", "default_reason", "hide_denied_tools", "guard_resources", "ask", "audit", "rules"}
+TOP_KEYS = {"version", "default", "default_reason", "hide_denied_tools", "guard_resources", "guard_prompts", "ask",
+            "audit", "rules"}
 _UNITS = {
     "s": 1, "sec": 1, "second": 1, "seconds": 1,
     "m": 60, "min": 60, "minute": 60, "minutes": 60,
@@ -366,6 +367,8 @@ class Policy:
         self.hide_denied_tools = bool(data.get("hide_denied_tools", False))
         # resources/read judged like a call to a tool named "resources/read" with arguments {uri, path}.
         self.guard_resources = bool(data.get("guard_resources", False))
+        # prompts/get judged like a call to a tool named "prompts/get" with arguments {name, arguments}.
+        self.guard_prompts = bool(data.get("guard_prompts", False))
         self.ask = data.get("ask") or {}
         self.audit = data.get("audit") or {}
         if not isinstance(self.ask, dict) or not isinstance(self.audit, dict):

@@ -39,6 +39,10 @@ def _key(msg_id: Any) -> str:
 
 
 RESOURCE_READ = "resources/read"
+PROMPT_GET = "prompts/get"
+# Rules on these names judge those requests, so a tools/call naming one is refused: it would be judged by rules
+# written for something else.
+RESERVED = (RESOURCE_READ, PROMPT_GET)
 
 
 def resource_readings(uri: str) -> tuple[list[dict] | None, str]:
@@ -295,10 +299,12 @@ class Judge:
         if not isinstance(msg, dict):
             return False
         m = msg.get("method")
-        return m == "tools/call" or (m == RESOURCE_READ and self.policy.guard_resources)
+        return m == "tools/call" or (m == RESOURCE_READ and self.policy.guard_resources) \
+            or (m == PROMPT_GET and self.policy.guard_prompts)
 
     def call(self, msg: dict) -> Verdict:
-        """Judge one tools/call (or resources/read). allow means forward it now; ask means call ask() (it blocks)."""
+        """Judge one tools/call (or resources/read, prompts/get). allow means forward it now; ask means call ask()
+        (it blocks)."""
         t0 = time.perf_counter_ns()
         w0 = time.time_ns() if tracing.enabled() else 0
         msg_id = msg.get("id")
@@ -309,6 +315,15 @@ class Judge:
             name = RESOURCE_READ
             readings, bad = resource_readings(uri) if isinstance(uri, str) else (None, "resources/read needs a string uri")
             args = readings[0] if readings else None
+        elif msg.get("method") == PROMPT_GET:
+            readings = None
+            prompt = params.get("name") if isinstance(params, dict) else None
+            values = params.get("arguments") if isinstance(params, dict) else None
+            name = PROMPT_GET
+            # Nested, so a prompt argument called "name" cannot stand in for the prompt's name.
+            args = {"name": prompt, "arguments": values} if values is not None else {"name": prompt}
+            bad = "" if isinstance(prompt, str) and (values is None or isinstance(values, dict)) else \
+                "prompts/get needs a string name and object arguments"
         else:
             readings = None
             name = params.get("name") if isinstance(params, dict) else None
@@ -322,7 +337,11 @@ class Judge:
             reply = {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32602, "message": f"agent-guard: {bad}"}}
             tracing.decision(msg, name, "deny", "malformed", "malformed request", w0)  # bad can quote the uri
             return Verdict("deny", name, args, None, reply if has_id else None)
-        decision = self._decide(name, readings) if readings else self.policy.evaluate(name, args)
+        if msg.get("method") == "tools/call" and name in RESERVED:
+            decision = Decision("deny", "reserved", f"a tool named {name} would be judged by the rules for {name} "
+                                                    "requests; agent-guard keeps that name for them")
+        else:
+            decision = self._decide(name, readings) if readings else self.policy.evaluate(name, args)
         eval_us = (time.perf_counter_ns() - t0) // 1000
         entry = {"event": "call", "id": msg_id, "tool": name, "args": self.scrub(args or {}),
                  "decision": decision.action, "rule": decision.rule, "reason": decision.reason, "eval_us": eval_us}
@@ -383,6 +402,10 @@ class Judge:
             uri = (msg.get("params") or {}).get("uri")
             return {"jsonrpc": "2.0", "id": msg.get("id"), "error": {
                 "code": -32001, "message": f"agent-guard blocked reading {uri}: {reason} (rule: {rule})"}}
+        if msg.get("method") == PROMPT_GET:  # nor here: a prompt answer is messages, so an error, like a missing prompt
+            prompt = (msg.get("params") or {}).get("name")
+            return {"jsonrpc": "2.0", "id": msg.get("id"), "error": {
+                "code": -32001, "message": f"agent-guard blocked the prompt {prompt}: {reason} (rule: {rule})"}}
         text = f"agent-guard blocked this call to {name}: {reason} (rule: {rule})"
         result: dict = {"content": [{"type": "text", "text": text}], "isError": True}
         if _wants_result_type(msg.get("params")):

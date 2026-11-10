@@ -60,7 +60,7 @@ def handle(msg):
         return None  # notifications need no answer
     if method == "initialize":
         result = {"protocolVersion": params.get("protocolVersion", "2025-06-18"),
-                  "capabilities": {"tools": {}, "resources": {}}, "serverInfo": {"name": "files-demo", "version": "0.1.0"}}
+                  "capabilities": {"tools": {}, "resources": {}, "prompts": {}}, "serverInfo": {"name": "files-demo", "version": "0.1.0"}}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
@@ -80,6 +80,9 @@ def handle(msg):
         except OSError as e:
             return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32002, "message": f"resource not found: {e}"}}
         result = {"contents": [{"uri": uri, "mimeType": "text/plain", "text": text}]}
+    elif method == "prompts/get":  # any prompt name: the text says what the server was asked for
+        text = f"prompt {params.get('name')} with {json.dumps(params.get('arguments') or {}, sort_keys=True)}"
+        result = {"messages": [{"role": "user", "content": {"type": "text", "text": text}}]}
     else:
         return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"method not found: {method}"}}
     return {"jsonrpc": "2.0", "id": mid, "result": result}

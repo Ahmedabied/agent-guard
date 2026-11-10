@@ -185,6 +185,7 @@ version: 1
 default: deny              # what happens when no rule matches
 hide_denied_tools: true    # drop tools that can never pass from tools/list
 guard_resources: true      # judge resources/read too (off by default, see below)
+guard_prompts: true        # and prompts/get (off by default)
 ask: {via: tty, timeout: 60}
 audit: {path: audit.jsonl}
 
@@ -252,6 +253,21 @@ example:
 ```yaml
   - {name: read-notes, tool: "resources/read", args: {scheme: file, path: {under: /data/notes}}, decision: allow}
 ```
+
+**Prompts.** A client fetching a prompt with `prompts/get` sends the server the prompt's name and its arguments,
+and gets back text that goes straight into the model's context. With `guard_prompts: true` every fetch is judged
+like a call to a tool named `prompts/get` with the arguments `name` (the prompt) and `arguments` (what the client
+filled in), so a rule can allow some prompts or deny one by an argument:
+
+```yaml
+  - {name: no-env-prompt, tool: "prompts/get", args: {name: dump_env}, decision: deny}
+  - {name: review-only-src, tool: "prompts/get", args: {name: review, arguments.path: {under: /src}}, decision: allow}
+```
+
+The prompt's arguments stay under `arguments`, so an argument called `name` cannot pass for the prompt's name. A
+blocked fetch is answered with a JSON-RPC error, as a missing prompt would be. A `tools/call` to a tool named
+`prompts/get` or `resources/read` is refused (rule `reserved`) whatever the policy says: rules on those names are
+written for those requests and must not judge a tool that took the name.
 
 `ask` sends the call to a person: `via: tty` asks on the terminal agent-guard was started from, `via: command`
 runs a command with the call as JSON on stdin (exit 0 approves), `via: deny` refuses. With nobody to ask, the
@@ -347,8 +363,10 @@ at most the result lines of calls still in flight; a power cut can lose the last
 - **HTTP: `Mcp-Param-*` for a tool the server does not list** cannot be built, so a call that carries them is
   refused (a call without them goes on, and a 2026-07-28 server refuses it if the tool needs them).
 - **HTTP: one message per POST.** JSON-RPC batches are refused (the 2025-06-18 revision removed them).
-- **`tools/call` is judged, and `resources/read` with `guard_resources: true`.** Without it resource reads pass
-  through untouched; prompts and sampling requests always do.
+- **`tools/call` is judged, `resources/read` with `guard_resources: true` and `prompts/get` with
+  `guard_prompts: true`.** Without them, reads and prompt fetches pass through untouched. `prompts/list` is not
+  filtered (`hide_denied_tools` hides tools only), `completion/complete` (argument suggestions, which also send
+  typed values to the server) is not judged, and requests from the server, such as sampling, always pass.
 - **Patterns, not a sandbox.** A rule on a shell command string is a speed bump: a determined agent can phrase
   `rm` in ways a regex will not catch. `under` is lexical and does not follow symlinks, because the guard may not
   share a filesystem with the server. Pair agent-guard with server-side limits (allowed folders, read-only users,
@@ -370,7 +388,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk,http,otel]'
-pytest -q                      # 188 tests (6 need node)
+pytest -q                      # 197 tests (6 need node)
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

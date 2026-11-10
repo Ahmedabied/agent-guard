@@ -2,9 +2,10 @@
 
 The client (the agent's host app) talks to the proxy on stdin and stdout. The proxy starts the
 real server as a child process and copies every message both ways untouched, except
-"tools/call" requests (and "resources/read" with guard_resources: true), which go through the policy first. A denied call never reaches the
-server: the client gets a normal tool result with isError set and the reason, so the agent can
-read it and change course instead of crashing.
+"tools/call" requests (and "resources/read" with guard_resources: true, "prompts/get" with guard_prompts: true),
+which go through the policy first. A denied call never reaches the server: the client gets a normal tool result
+with isError set and the reason, so the agent can read it and change course instead of crashing (a denied read or
+prompt gets a JSON-RPC error, since it has no tool result to carry the reason).
 
 MCP over stdio is newline-delimited JSON-RPC, so this needs no MCP SDK and does not care which
 protocol version the two ends agree on. The decisions themselves live in judge.py.
@@ -166,7 +167,7 @@ class Proxy:
             self._to_server(_line(keep))
 
     def _call(self, msg: dict) -> bool:
-        """Judge one tools/call (or resources/read). True means forward it now."""
+        """Judge one tools/call (or resources/read, prompts/get). True means forward it now."""
         verdict = self.judge.call(msg)
         if verdict.action == "allow":
             self._track(msg.get("id"), "id" in msg, verdict.name)
