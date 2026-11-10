@@ -1,0 +1,15 @@
+# Policy for examples/http_demo.py: agent-guard serve in front of a remote tracker server.
+default: deny
+hide_denied_tools: true
+
+rules:
+  - name: prod-is-hands-off
+    tool: close_issue
+    args:
+      repo: "prod/*"
+    decision: deny
+    reason: issues in prod/ repositories are closed by people, not agents
+
+  - name: tracker-work
+    tool: [list_issues, close_issue]
+    decision: allow

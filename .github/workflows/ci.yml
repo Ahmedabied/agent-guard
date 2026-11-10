@@ -28,6 +28,8 @@ jobs:
         run: pytest -q
       - name: Example policy regression cases
         run: agent-guard test -p examples/guard.yaml examples/guard-tests.yaml
+      - name: HTTP gateway demo
+        run: python examples/http_demo.py
       - name: Benchmark smoke run
         run: |
           python bench/bench.py --calls 300

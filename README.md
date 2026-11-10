@@ -93,7 +93,25 @@ comes back as a tool error, and a write elsewhere goes through.
 ## Remote servers over HTTP
 
 A server with a URL (Streamable HTTP) gets a gateway instead of a wrapper. It listens on localhost, judges every
-request with the same policy and audit log as `run`, and passes the rest to the server:
+request with the same policy and audit log as `run`, and passes the rest to the server. To see it once, with a
+pretend issue tracker as the server and an agent on the official MCP SDK:
+
+```sh
+pip install -e '.[http,sdk]' && python examples/http_demo.py
+```
+
+```
+2. An agent session through the gateway
+  connected to http://127.0.0.1:37733/mcp, protocol 2026-07-28
+  tools: close_issue, list_issues  (delete_repo is hidden)
+  ok      list_issues(repo='sandbox/demo')
+  BLOCKED close_issue(repo='prod/api', number=12)
+          -> agent-guard blocked this call to close_issue: issues in prod/ repositories are closed by people, not agents (rule: prod-is-hands-off)
+  ok      close_issue(repo='sandbox/demo', number=15)
+  BLOCKED delete_repo(repo='prod/api')
+```
+
+For a real server:
 
 ```sh
 pip install 'agent-guard[http] @ git+https://github.com/Ahmedabied/agent-guard'   # or pip install -e '.[http]'
