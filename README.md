@@ -18,7 +18,8 @@ agent (MCP client)  <--HTTP--->  agent-guard serve  <--HTTPS-->  remote MCP serv
 ```
 
 - **Rules as code.** A YAML file says allow, deny or ask for each call, by tool name, argument patterns and rate.
-  First match wins, like a firewall. Anything not listed is denied.
+  First match wins, like a firewall. Anything not listed is denied. Resource reads and prompt fetches can be
+  judged the same way.
 - **Blocked calls fail softly.** The agent gets a normal tool error with the reason, so it can change course.
   The server never sees the call.
 - **Audit log you can check.** Every decision and result is one JSON line, hash-chained to the line before it.
@@ -28,15 +29,15 @@ agent (MCP client)  <--HTTP--->  agent-guard serve  <--HTTPS-->  remote MCP serv
   regression test. `agent-guard test` replays those tests in CI, so nobody can quietly loosen the policy later.
 - **Tools that can never pass are hidden** from `tools/list`, so the agent does not waste turns on them.
 - **Local and remote servers.** Over stdio, or as a gateway in front of a Streamable HTTP server, on both MCP wires
-  (2025 sessions and 2026-07-28). Checked in CI with the official Python and TypeScript SDK clients, and by hand
-  against a public server.
+  (2025 sessions and 2026-07-28). Checked in CI with the official Python and TypeScript SDK clients and the
+  official reference server, and by hand against a public server.
 - **Decisions in your traces.** With an OTLP endpoint set, each decision is an OpenTelemetry span inside the
   agent's own trace, so a blocked call is visible where you already look ([screenshot](#traces)).
 
 Stdlib Python plus PyYAML. No MCP SDK needed at runtime: MCP over stdio is newline-delimited JSON-RPC, and
-agent-guard only steps in on `tools/call`, so it works with any protocol version the two ends agree on. The HTTP
-gateway needs the `http` extra: Starlette, Uvicorn with httptools, and HTTPX2, the HTTP stack the MCP SDK itself
-runs on.
+agent-guard only steps in on `tools/call` (and resource reads and prompt fetches, if you turn those on), so it
+works with any protocol version the two ends agree on. The HTTP gateway needs the `http` extra: Starlette, Uvicorn
+with httptools, and HTTPX2, the HTTP stack the MCP SDK itself runs on.
 
 ## Try it in under a minute
 
