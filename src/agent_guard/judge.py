@@ -320,7 +320,7 @@ class Judge:
                       "decision": "deny", "rule": "malformed", "reason": bad})
             self._count("denied")
             reply = {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32602, "message": f"agent-guard: {bad}"}}
-            tracing.decision(msg, name, "deny", "malformed", bad, w0)
+            tracing.decision(msg, name, "deny", "malformed", "malformed request", w0)  # bad can quote the uri
             return Verdict("deny", name, args, None, reply if has_id else None)
         decision = self._decide(name, readings) if readings else self.policy.evaluate(name, args)
         eval_us = (time.perf_counter_ns() - t0) // 1000
@@ -368,7 +368,7 @@ class Judge:
         msg_id = msg.get("id")
         if not self.log({"event": "approval", "id": msg_id, "tool": name, "approved": ok, "how": how}):
             ok, how = False, "the audit log could not be written"
-        tracing.decision(msg, name, "allow" if ok else "deny", decision.rule, how, w0, approval=ok)
+        tracing.decision(msg, name, "allow" if ok else "deny", decision.rule, decision.reason, w0, approval=ok)
         if ok:
             self.policy.charge(decision)
             return Verdict("allow", name, args, decision)

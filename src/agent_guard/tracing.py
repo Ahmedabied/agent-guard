@@ -5,8 +5,8 @@ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT). Then every judged call gets one span, `agen
 the decision and the rule. Its parent is the trace context the client put in the request's `_meta` (MCP's W3C
 `traceparent`), so in the agent's own trace a blocked call shows the guard's span and no server span.
 
-What a span carries: the method, tool name, decision, rule, the policy's reason and the request id. Never the
-arguments or a resource uri: those can hold anything, and the audit log's scrubber does not reach a tracing
+What a span carries: the method, tool name, decision, rule, the reason written in the policy (never one built from
+the request) and the request id. Never the arguments or a resource uri: those can hold anything, and the audit log's scrubber does not reach a tracing
 backend. Recording a span happens after the decision, and any error in it is swallowed, so tracing can neither
 change a decision nor fail one.
 """

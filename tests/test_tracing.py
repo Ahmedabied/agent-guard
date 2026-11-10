@@ -72,12 +72,15 @@ def test_spans_never_carry_arguments_or_uris(spans):
     judge.call(call("read_file", {"path": "/srv/secret-plan.txt", "token": "tok-123"}))
     judge.call(call(None, "file:///srv/private/notes.md", 2, method="resources/read"))
     judge.call(call("delete_file", "not an object", 3))  # malformed
+    judge.call(call(None, "file://admin:hunter2@private-host/srv/a", 4, method="resources/read"))  # refused, quotes it
     for s in spans.get_finished_spans():
         assert set(s.attributes) <= ALLOWED_KEYS
         flat = json.dumps(dict(s.attributes)) + s.name
         assert "secret-plan" not in flat and "tok-123" not in flat and "private/notes" not in flat
+        assert "hunter2" not in flat and "private-host" not in flat
     names = [s.name for s in spans.get_finished_spans()]
-    assert names == ["agent-guard tools/call read_file", "agent-guard resources/read", "agent-guard tools/call delete_file"]
+    assert names == ["agent-guard tools/call read_file", "agent-guard resources/read",
+                     "agent-guard tools/call delete_file", "agent-guard resources/read"]
 
 
 def test_no_or_broken_trace_context_gives_a_root_span(spans):
