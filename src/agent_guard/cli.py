@@ -56,8 +56,8 @@ def cmd_serve(a) -> int:
     try:
         from .gateway import Gateway, GatewayError, parse_listen, serve, upstream_headers_from_env
     except ImportError as e:
-        print(f"agent-guard serve needs the http extra: pip install 'agent-guard[http]' ({e.name} is missing)",
-              file=sys.stderr)
+        print(f"agent-guard serve needs the http extra ({e.name} is missing): pip install -e '.[http]' in a clone, "
+              "or pip install 'agent-guard[http] @ git+https://github.com/Ahmedabied/agent-guard'", file=sys.stderr)
         return 2
     from .judge import Judge, make_approver
 

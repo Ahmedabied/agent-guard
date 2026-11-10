@@ -29,8 +29,8 @@ agent (MCP client)  <--stdio-->  agent-guard  <--stdio-->  MCP server (files, sh
 
 Stdlib Python plus PyYAML. No MCP SDK needed at runtime: MCP over stdio is newline-delimited JSON-RPC, and
 agent-guard only steps in on `tools/call`, so it works with any protocol version the two ends agree on. The HTTP
-gateway needs three more packages (`pip install 'agent-guard[http]'`: Starlette, Uvicorn and HTTPX2, the HTTP
-stack the MCP SDK itself runs on).
+gateway needs the `http` extra: Starlette, Uvicorn with httptools, and HTTPX2, the HTTP stack the MCP SDK itself
+runs on.
 
 ## Try it in under a minute
 
@@ -96,14 +96,15 @@ A server with a URL (Streamable HTTP) gets a gateway instead of a wrapper. It li
 request with the same policy and audit log as `run`, and passes the rest to the server:
 
 ```sh
-pip install 'agent-guard[http]'
+pip install 'agent-guard[http] @ git+https://github.com/Ahmedabied/agent-guard'   # or pip install -e '.[http]'
 export MCP_TOKEN="Bearer ..."            # only if the server wants a key
 agent-guard serve -p guard.yaml --upstream https://mcp.example.com/mcp \
     --upstream-header Authorization=MCP_TOKEN
 # agent-guard: serving http://127.0.0.1:8808/mcp -> https://mcp.example.com/mcp
 ```
 
-Then point the client at `http://127.0.0.1:8808/mcp` instead of the server's URL. It works with both wires the
+Install it from this repository: the name `agent-guard` on PyPI belongs to an unrelated project. Then point the
+client at `http://127.0.0.1:8808/mcp` instead of the server's URL. It works with both wires the
 official SDK speaks: the 2025 one (`initialize`, a session id, answers as JSON or an SSE stream, a GET stream for
 server messages) and 2026-07-28 (one self-contained POST per request). A denied call is answered by the gateway
 and never sent. Tools the policy never allows are hidden from `tools/list` in JSON and SSE answers alike.
@@ -133,8 +134,8 @@ checks the server never saw it.
 
 Checked against a real remote server, DeepWiki's public one (`https://mcp.deepwiki.com/mcp`, no key), with the
 official MCP Python SDK client in both handshakes and a policy that denies `ask_question`: the tool disappears
-from the list, a call to it is answered by the gateway, `read_wiki_structure` goes through (0.36 s, the server's
-own time), and `agent-guard verify` reads the log as intact.
+from the list, a call to it is answered by the gateway, `read_wiki_structure` goes through (about 0.4 s, the
+server's own time), and `agent-guard verify` reads the log as intact.
 
 ## The policy
 
@@ -262,7 +263,7 @@ directly and once through agent-guard with the example policy and a real audit l
 Five runs on an Intel i5-14400F, Python 3.12, with the machine busy (load 3.4). Most of the added time is the two
 extra pipe hops and thread wake-ups, not the checks: the policy is 3.6 us and the audit write about 12 us.
 Over HTTP (`python bench/bench_http.py --calls 2000`, the SDK demo server on 2026-07-28 with JSON answers), the
-gateway adds about 0.7 ms per call: 0.66 to 0.75 ms (median) over five runs on Python 3.13, next to 0.62 to
+gateway adds about 0.7 ms per call: 0.68 to 0.72 ms (median) over five runs on Python 3.13, next to 0.60 to
 0.63 ms for the server's own round trip. That is one more HTTP server and client hop on loopback; against a remote server it is small next to
 the network.
 
@@ -300,7 +301,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk,http]'
-pytest -q                      # 163 tests
+pytest -q                      # 166 tests
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

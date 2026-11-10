@@ -235,6 +235,8 @@ def test_mcp_param_headers_for_a_tool_the_server_does_not_list_are_refused(rig):
     assert res.status_code == 400 and res.json()["error"]["code"] == -32020
     assert [json.loads(q["body"])["method"] for q in r.upstream_requests()] == ["tools/list"]  # never the call
     assert r.audit_entries()[-1]["error"].startswith("refused: cannot check the Mcp-Param headers")
+    again = r.post({**body, "id": 2}, headers={**MODERN, "mcp-name": "lire_secret", "mcp-param-path": "/etc/passwd"})
+    assert again.status_code == 400 and len(r.upstream_requests()) == 1  # the miss is remembered for a while
 
 
 def test_a_denied_call_sends_nothing_upstream_not_even_a_schema_lookup(rig):
@@ -371,3 +373,56 @@ def test_serve_refuses_unsafe_setups(tmp_path, args, why):
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=20, env={k: v for k, v in os.environ.items()
                                                                               if k != "AG_TEST_UNSET_VAR"})
     assert p.returncode == 2 and why in p.stderr
+
+
+# ---- the same policy features as the stdio proxy ----------------------------------------------------------------
+
+ASK_POLICY = f"""
+default: deny
+ask: {{via: command, command: [{json.dumps(sys.executable)}, -c, "import sys, json; d = json.load(sys.stdin); sys.exit(0 if d['arguments']['text'] == 'yes' else 1)"]}}
+rules:
+  - {{name: confirm, tool: echo, decision: ask, reason: echo needs a yes}}
+"""
+
+
+def test_ask_runs_the_approver_and_only_an_approved_call_reaches_the_server(rig):
+    r = rig(policy=ASK_POLICY)
+    call = {"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "echo", "arguments": {}}}
+    yes = r.post({**call, "id": 1, "params": {"name": "echo", "arguments": {"text": "yes"}}})
+    no = r.post({**call, "id": 2, "params": {"name": "echo", "arguments": {"text": "no"}}})
+    assert yes.json()["result"]["content"][0]["text"] == "ran echo"
+    assert no.json()["result"]["isError"] is True and "not approved" in no.json()["result"]["content"][0]["text"]
+    assert [json.loads(q["body"])["params"]["arguments"]["text"] for q in r.upstream_requests()] == ["yes"]
+    assert [e["approved"] for e in r.audit_entries() if e["event"] == "approval"] == [True, False]
+
+
+RESOURCE_POLICY = """
+default: deny
+guard_resources: true
+rules:
+  - {name: no-secrets, tool: resources/read, args: {path: {under: /srv/secrets}}, decision: deny, reason: secrets stay put}
+  - {name: docs, tool: resources/read, args: {scheme: file}, decision: allow}
+"""
+
+
+@pytest.mark.parametrize("modern", [False, True])
+def test_resources_read_is_judged_over_http(rig, modern):
+    from agent_guard.params import encode
+
+    r = rig(policy=RESOURCE_POLICY)
+
+    def read(uri, i):
+        p = {"uri": uri}
+        headers = {}
+        if modern:
+            p["_meta"] = META
+            headers = {"mcp-protocol-version": "2026-07-28", "mcp-method": "resources/read", "mcp-name": encode(uri)}
+        return r.post({"jsonrpc": "2.0", "id": i, "method": "resources/read", "params": p}, headers=headers)
+
+    ok = read("file:///srv/docs/a.md", 1)
+    sneaky = read("file:///srv/docs/%2e%2e/secrets/key.pem", 2)
+    other = read("https://example.com/x", 3)
+    assert ok.status_code == 200 and "error" not in ok.json()
+    assert sneaky.json()["error"]["code"] == -32001 and "secrets stay put" in sneaky.json()["error"]["message"]
+    assert other.json()["error"]["code"] == -32001
+    assert [json.loads(q["body"])["params"]["uri"] for q in r.upstream_requests()] == ["file:///srv/docs/a.md"]

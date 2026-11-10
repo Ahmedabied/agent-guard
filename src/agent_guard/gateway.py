@@ -46,6 +46,7 @@ NAME_PARAM = {"tools/call": "name", "prompts/get": "name", "resources/read": "ur
 ROUTING = ("mcp-method", "mcp-name", "mcp-protocol-version")
 VERSION_META = "io.modelcontextprotocol/protocolVersion"
 HEADER_MISMATCH = -32020  # the MCP SDK's code for a routing header that disagrees with the body
+MISS_TTL = 30.0  # seconds before asking the server again about a tool it did not list
 MODERN = "2026-07-28"  # from this version on, requests carry routing headers and Mcp-Param-* headers
 
 # Request headers copied to the upstream. Everything else (Cookie, Authorization, Forwarded, hop-by-hop) stays here.
@@ -169,6 +170,7 @@ class Gateway:
             timeout=httpx2.Timeout(connect=connect_timeout, read=None, write=30, pool=connect_timeout),
         )
         self.param_maps: dict[str, dict] = {}  # tool name -> argument path -> Mcp-Param header token
+        self._missed: dict[str, float] = {}  # tool name -> when the server last did not list it
         self.app = Starlette(routes=[Route(PATH, self.handle, methods=["GET", "POST", "DELETE"])])
 
     # ---- checks ---------------------------------------------------------------------------
@@ -234,8 +236,12 @@ class Gateway:
         args = body.get("arguments") if isinstance(body, dict) else None
         if not isinstance(name, str) or not isinstance(args, (dict, type(None))):
             return {}, ""  # malformed: the judge denies it
-        if name not in self.param_maps:
+        if name not in self.param_maps and time.monotonic() - self._missed.get(name, -MISS_TTL) >= MISS_TTL:
             await self._fetch_tools(request, msg)
+            if name not in self.param_maps:  # not listed: do not ask again for every call
+                if len(self._missed) > 1000:
+                    self._missed.clear()
+                self._missed[name] = time.monotonic()
         hmap = self.param_maps.get(name)
         if hmap is None:
             if any(k.startswith(params.PREFIX) for k in request.headers.keys()):
