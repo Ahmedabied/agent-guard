@@ -83,6 +83,13 @@ def test_spans_never_carry_arguments_or_uris(spans):
                      "agent-guard tools/call delete_file", "agent-guard resources/read"]
 
 
+def test_client_chosen_names_and_ids_are_capped(spans):
+    Judge(POLICY).call(call("x" * 5000, {}, "i" * 5000))
+    [s] = spans.get_finished_spans()
+    assert len(s.attributes["gen_ai.tool.name"]) == 200 and len(s.attributes["jsonrpc.request.id"]) == 100
+    assert len(s.name) < 250
+
+
 def test_no_or_broken_trace_context_gives_a_root_span(spans):
     judge = Judge(POLICY)
     judge.call(call("read_file", {}, 1))

@@ -4,8 +4,9 @@ JSON instead of an SSE stream."""
 import sys
 from typing import Annotated
 
-from mcp.server.mcpserver import MCPServer
-from pydantic import Field
+import anyio
+from mcp.server.mcpserver import Context, Elicit, MCPServer, Resolve
+from pydantic import BaseModel, Field
 
 server = MCPServer("sdk-demo")
 
@@ -33,6 +34,29 @@ def forecast(region: Annotated[str, Field(json_schema_extra={"x-mcp-header": "Re
              days: Annotated[int, Field(json_schema_extra={"x-mcp-header": "Days"})] = 1) -> str:
     """Region and days are mirrored into Mcp-Param headers on 2026-07-28, and the server checks them."""
     return f"sunny in {region} for {days} days"
+
+
+@server.tool()
+async def slow(seconds: float, steps: int, ctx: Context) -> str:
+    """Works for a while and reports progress along the way."""
+    for i in range(steps):
+        await ctx.report_progress(i + 1, steps)
+        await anyio.sleep(seconds / steps)
+    return "slow done"
+
+
+class Sure(BaseModel):
+    sure: bool
+
+
+def ask_sure(path: str) -> Elicit[Sure]:
+    return Elicit(f"Really delete {path}?", Sure)
+
+
+@server.tool()
+async def confirm_delete(path: str, answer: Annotated[Sure, Resolve(ask_sure)]) -> str:
+    """Asks the client before it pretends to delete: mid-call on 2025, as input_required on 2026-07-28."""
+    return f"deleted {path}" if answer.sure else f"kept {path}"
 
 
 if __name__ == "__main__":

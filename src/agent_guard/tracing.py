@@ -87,7 +87,7 @@ def decision(msg: dict, name: Any, action: str, rule: str | None, reason: str | 
         return
     try:
         method = msg.get("method")
-        tool = name if isinstance(name, str) else None
+        tool = name[:200] if isinstance(name, str) else None  # client-chosen: capped
         label = "approval" if approval is not None else method
         attributes: dict[str, Any] = {"mcp.method.name": method if isinstance(method, str) else "",
                                       "agent_guard.decision": action}
@@ -100,7 +100,7 @@ def decision(msg: dict, name: Any, action: str, rule: str | None, reason: str | 
         if approval is not None:
             attributes["agent_guard.approved"] = approval
         if "id" in msg and isinstance(msg["id"], (str, int)) and not isinstance(msg["id"], bool):
-            attributes["jsonrpc.request.id"] = str(msg["id"])
+            attributes["jsonrpc.request.id"] = str(msg["id"])[:100]
         target = f" {tool}" if method == "tools/call" and tool else ""
         span = _tracer.start_span(f"agent-guard {label}{target}", context=_parent(msg), start_time=start_ns,
                                   attributes=attributes)

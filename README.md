@@ -150,6 +150,14 @@ comes from `--upstream-header NAME=ENVVAR`, read from the environment so it is n
 header value is ever written to the audit log. Each of these refusals has a test that sends the request and then
 checks the server never saw it.
 
+The flows around a call work too, each with a test on both wires: progress notifications arrive while the tool
+runs (the gateway streams, it does not buffer); a server can ask the client something mid-call (elicitation:
+on 2025 the question rides the call's stream and the answer is a new POST; on 2026-07-28 the call ends
+`input_required` and the client sends it again with the answer, and the guard judges, logs and rate-counts that
+second call like any other, because it carries new content); a client that gives up cancels the call upstream
+too (2026-07-28 cancels by closing the request, so the gateway closes its own); and a call approved by `ask` after
+its client has left is not sent.
+
 Long sessions are fine: each 2025 session keeps a stream open for server messages, and with 600 of them open
 through one gateway a call still answered in 3 ms; when their clients went away, every upstream connection closed
 with them (file descriptors back to the baseline). 150 SDK sessions in a row leave nothing behind.
@@ -355,7 +363,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk,http,otel]'
-pytest -q                      # 180 tests (6 need node)
+pytest -q                      # 188 tests (6 need node)
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

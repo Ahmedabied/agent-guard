@@ -111,6 +111,35 @@ def _sse_data(stream: str) -> list[str]:
     return out
 
 
+async def _unless_client_leaves(request: Request, fn, *args) -> Any:
+    """Await fn(*args) unless the client disconnects first, which cancels it (closing any upstream request it has
+    open). None if the client left; an httpx2.HTTPError is returned, not raised."""
+    value: Any = None
+
+    async def watch() -> None:
+        while (await request.receive())["type"] != "http.disconnect":
+            pass
+        tg.cancel_scope.cancel()
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(watch)
+        try:
+            value = await fn(*args)  # runs in this task, inside the group's cancel scope
+        except httpx2.HTTPError as e:
+            value = e
+        tg.cancel_scope.cancel()
+    return value
+
+
+async def _read_capped(upstream: httpx2.Response) -> bytes:
+    data = bytearray()
+    async for chunk in upstream.aiter_bytes():
+        data += chunk
+        if len(data) > MAX_ANSWER:
+            break
+    return bytes(data)
+
+
 def _plain(status: int, text: str) -> Response:
     return Response(f"agent-guard: {text}\n", status_code=status, media_type="text/plain")
 
@@ -348,6 +377,11 @@ class Gateway:
             verdict = self.judge.call(msg)
             if verdict.action == "ask":
                 verdict = await anyio.to_thread.run_sync(self.judge.ask, msg, verdict)
+                if verdict.action == "allow" and await request.is_disconnected():
+                    # Approved, but nobody is waiting for the answer any more: a call is not sent on its own.
+                    self.judge.log({"event": "result", "id": msg.get("id"), "tool": verdict.name, "ok": False,
+                                    "us": 0, "error": "client left before the approval; not sent"})
+                    return Response(status_code=499)
             if verdict.action != "allow":
                 if verdict.reply is None:
                     return Response(status_code=202)
@@ -372,11 +406,14 @@ class Gateway:
                        extra: dict[str, str] | None = None) -> Response:
         req = self.client.build_request(method, self.upstream, headers=self._headers(request, body is not None, extra),
                                         content=body)
-        try:
-            upstream = await self.client.send(req, stream=True)
-        except httpx2.HTTPError as e:
-            watch.unanswered(f"upstream unreachable: {type(e).__name__}")
-            return _error(msg_id, -32603, f"upstream unreachable ({type(e).__name__})", 502)
+        got = await _unless_client_leaves(request, self._fetch, req)
+        if got is None:  # 2026-07-28 cancels a request by closing it, so the upstream request is closed too
+            watch.unanswered("client left before the answer")
+            return Response(status_code=499)
+        if isinstance(got, httpx2.HTTPError):
+            watch.unanswered(f"upstream unreachable: {type(got).__name__}")
+            return _error(msg_id, -32603, f"upstream unreachable ({type(got).__name__})", 502)
+        upstream, data = got
         if 300 <= upstream.status_code < 400:
             await upstream.aclose()
             watch.unanswered(f"upstream redirect {upstream.status_code} not followed")
@@ -386,18 +423,12 @@ class Gateway:
         if ctype == "text/event-stream":
             return StreamingResponse(self._events(upstream, watch), status_code=upstream.status_code,
                                      headers=headers)
-        try:
-            data = bytearray()
-            async for chunk in upstream.aiter_bytes():
-                data += chunk
-                if len(data) > MAX_ANSWER:
-                    watch.unanswered("upstream answer too large")
-                    return _error(msg_id, -32603, "upstream answer too large", 502)
-        except httpx2.HTTPError as e:
-            watch.unanswered(f"upstream failed mid-answer: {type(e).__name__}")
-            return _error(msg_id, -32603, f"upstream failed mid-answer ({type(e).__name__})", 502)
-        finally:
-            await upstream.aclose()
+        if isinstance(data, httpx2.HTTPError):
+            watch.unanswered(f"upstream failed mid-answer: {type(data).__name__}")
+            return _error(msg_id, -32603, f"upstream failed mid-answer ({type(data).__name__})", 502)
+        if len(data) > MAX_ANSWER:
+            watch.unanswered("upstream answer too large")
+            return _error(msg_id, -32603, "upstream answer too large", 502)
         out = bytes(data)
         if ctype == "application/json" and out:
             try:
@@ -410,6 +441,19 @@ class Gateway:
             watch.unanswered(f"upstream HTTP {upstream.status_code} without an answer")
         headers.pop("content-length", None)
         return Response(out, status_code=upstream.status_code, headers=headers)
+
+    async def _fetch(self, req: httpx2.Request) -> tuple[httpx2.Response, Any]:
+        """Send, and read the whole answer unless it is an SSE stream (that one is passed on as it comes)."""
+        upstream = await self.client.send(req, stream=True)
+        if upstream.headers.get("content-type", "").split(";")[0].strip().lower() == "text/event-stream" \
+                or 300 <= upstream.status_code < 400:
+            return upstream, None
+        try:
+            return upstream, await _read_capped(upstream)
+        except httpx2.HTTPError as e:
+            return upstream, e
+        finally:
+            await upstream.aclose()
 
     async def _events(self, upstream: httpx2.Response, watch: Watch) -> AsyncIterator[bytes]:
         """Pass an SSE stream through one event at a time, inspecting each data payload."""
@@ -435,6 +479,9 @@ class Gateway:
                 yield self._event(lines, watch)
         except httpx2.HTTPError as e:
             watch.unanswered(f"upstream stream failed: {type(e).__name__}")
+        except (anyio.get_cancelled_exc_class(), GeneratorExit):  # the client went away mid-answer
+            watch.unanswered("client left mid-answer")
+            raise
         finally:
             await upstream.aclose()
             watch.unanswered("upstream stream ended without an answer")

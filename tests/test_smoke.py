@@ -2,4 +2,4 @@ import agent_guard
 
 
 def test_version():
-    assert agent_guard.__version__ == "0.3.0"
+    assert agent_guard.__version__ == "0.3.1"
