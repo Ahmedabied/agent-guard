@@ -8,3 +8,4 @@ build/
 *.log
 audit*.jsonl
 !tests/fixtures/*.jsonl
+tests/ts/node_modules

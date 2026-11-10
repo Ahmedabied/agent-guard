@@ -132,6 +132,11 @@ comes from `--upstream-header NAME=ENVVAR`, read from the environment so it is n
 header value is ever written to the audit log. Each of these refusals has a test that sends the request and then
 checks the server never saw it.
 
+CI runs the official TypeScript SDK clients through the gateway too, v1 (`@modelcontextprotocol/sdk` 1.32) and v2
+(`@modelcontextprotocol/client` 2.4) in both handshakes, against a server answering with SSE and with JSON: the
+same hidden tool, allowed read and two blocked calls, plus a 2026-07-28 call whose `Mcp-Param` headers the server
+checks (`tests/test_ts_clients.py`).
+
 Checked against a real remote server, DeepWiki's public one (`https://mcp.deepwiki.com/mcp`, no key), with the
 official MCP Python SDK client in both handshakes and a policy that denies `ask_question`: the tool disappears
 from the list, a call to it is answered by the gateway, `read_wiki_structure` goes through (about 0.4 s, the
@@ -301,13 +306,13 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk,http]'
-pytest -q                      # 166 tests
+pytest -q                      # 172 tests (6 need node)
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on
 both sides, in both handshakes: `initialize` (2025 protocol versions) and `server/discover` (2026-07-28, where
-every result must carry `resultType`), over stdio and through the HTTP gateway (SSE and JSON answers). CI
-runs the tests, the example policy's regression cases and a short
+every result must carry `resultType`), over stdio and through the HTTP gateway (SSE and JSON answers); a CI job
+does the same with the TypeScript SDK clients (`npm install --prefix tests/ts` to run it here). CI runs the tests, the example policy's regression cases and a short
 benchmark on Python 3.10, 3.12 and 3.13.
 
 Built with AI pair programming.

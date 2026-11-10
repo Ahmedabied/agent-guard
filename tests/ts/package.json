@@ -1,0 +1,10 @@
+{
+  "name": "agent-guard-ts-clients",
+  "private": true,
+  "type": "module",
+  "description": "The official MCP TypeScript SDK clients, v1 and v2, for tests/test_ts_clients.py",
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
+    "@modelcontextprotocol/sdk": "1.32.2"
+  }
+}
