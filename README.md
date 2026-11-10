@@ -406,7 +406,7 @@ The tests start real processes on real pipes. One suite drives agent-guard with 
 both sides, in both handshakes: `initialize` (2025 protocol versions) and `server/discover` (2026-07-28, where
 every result must carry `resultType`), over stdio and through the HTTP gateway (SSE and JSON answers); a CI job
 does the same with the TypeScript SDK clients (`npm install --prefix tests/ts` to run it here). CI runs the tests, the example policy's regression cases and a short
-benchmark on Python 3.10, 3.12 and 3.13.
+benchmark on Python 3.10, 3.12, 3.13, 3.14 and 3.15.
 
 Built with AI pair programming.
 
