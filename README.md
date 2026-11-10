@@ -123,7 +123,8 @@ What the server receives is built by the gateway: the body is re-serialised from
 only MCP's own headers are copied (`Accept`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`,
 `Last-Event-ID`). `Mcp-Param-*` headers (2026-07-28: tool arguments the schema marks with `x-mcp-header`, mirrored
 so a load balancer can route on them) are never copied from the client. The gateway learns each tool's schema from
-the `tools/list` answers it passes on (or asks the server itself the first time it meets a tool) and writes the
+the `tools/list` answers it passes on (or, for an allowed call to a tool it has not met, asks the server itself
+under its own name) and writes the
 headers from the judged arguments, with the same rules as the official SDK (checked against its own functions in
 the tests). So whatever routes on `Mcp-Param-Region` sees the region the policy saw, and a forged one is replaced. The client's `Authorization` and cookies are never forwarded; the server's key
 comes from `--upstream-header NAME=ENVVAR`, read from the environment so it is not on the command line, and no
@@ -299,7 +300,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk,http]'
-pytest -q                      # 162 tests
+pytest -q                      # 163 tests
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

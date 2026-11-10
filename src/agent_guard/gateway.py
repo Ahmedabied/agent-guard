@@ -36,7 +36,7 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
-from . import params
+from . import __version__, params
 from .judge import Judge, _line, parse_strict, recover_id
 
 PATH = "/mcp"
@@ -245,11 +245,13 @@ class Gateway:
 
     async def _fetch_tools(self, request: Request, msg: dict) -> None:
         """Ask the upstream for its tools (2026-07-28 requests stand alone, so this needs no session)."""
-        meta = msg["params"].get("_meta")
         version = self._version(request, msg)
+        # The gateway's own identity, not the client's _meta: nothing the client wrote rides on this request.
+        meta = {VERSION_META: version, "io.modelcontextprotocol/clientInfo": {"name": "agent-guard", "version": __version__},
+                "io.modelcontextprotocol/clientCapabilities": {}}
         cursor = None
         for page in range(20):
-            p: dict = {"_meta": meta} if isinstance(meta, dict) else {}
+            p: dict = {"_meta": meta}
             if cursor:
                 p["cursor"] = cursor
             req_id = f"agent-guard-tools-{page}"
@@ -320,12 +322,6 @@ class Gateway:
         if mismatch:
             self.judge.log({"event": "rejected", "id": msg.get("id"), "reason": mismatch})
             return _error(msg.get("id"), HEADER_MISMATCH, mismatch, 400)
-        extra: dict[str, str] = {}
-        if msg.get("method") == "tools/call" and self._version(request, msg) >= MODERN:
-            extra, why = await self._param_headers(request, msg)
-            if why:
-                self.judge.log({"event": "rejected", "id": msg.get("id"), "reason": why})
-                return _error(msg.get("id"), HEADER_MISMATCH, why, 400)
         call = None
         if self.judge.judged(msg):
             verdict = self.judge.call(msg)
@@ -340,8 +336,15 @@ class Gateway:
         list_id = None
         if msg.get("method") == "tools/list" and "id" in msg:
             list_id = json.dumps(msg["id"], sort_keys=True)
-        # The upstream gets exactly what the policy judged, re-serialised from the parse.
         watch = Watch(self.judge, call, list_id, self.learn)
+        extra: dict[str, str] = {}
+        # Only for an allowed call, so a denied one causes no traffic upstream and says nothing about the server.
+        if msg.get("method") == "tools/call" and self._version(request, msg) >= MODERN:
+            extra, why = await self._param_headers(request, msg)
+            if why:
+                watch.unanswered(f"refused: {why}")
+                return _error(msg.get("id"), HEADER_MISMATCH, why, 400)
+        # The upstream gets exactly what the policy judged, re-serialised from the parse.
         return await self._forward(request, "POST", _line(msg)[:-1], watch, msg.get("id"), extra)
 
     async def _forward(self, request: Request, method: str, body: bytes | None, watch: Watch, msg_id: Any,

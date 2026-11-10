@@ -221,7 +221,9 @@ def test_the_gateway_looks_up_a_schema_it_has_not_seen(rig):
     res = r.post(forecast("åland"), headers={**MODERN, "mcp-param-region": "anything"})
     assert res.status_code == 200
     first, call = r.upstream_requests()
-    assert json.loads(first["body"])["method"] == "tools/list" and json.loads(first["body"])["params"] == {"_meta": META}
+    listing = json.loads(first["body"])
+    assert listing["method"] == "tools/list"
+    assert listing["params"]["_meta"]["io.modelcontextprotocol/clientInfo"]["name"] == "agent-guard"  # not the client's
     from agent_guard.params import decode
     assert decode(dict(call["headers"])["mcp-param-region"]) == "åland"
 
@@ -232,6 +234,15 @@ def test_mcp_param_headers_for_a_tool_the_server_does_not_list_are_refused(rig):
     res = r.post(body, headers={**MODERN, "mcp-name": "lire_secret", "mcp-param-path": "/etc/passwd"})
     assert res.status_code == 400 and res.json()["error"]["code"] == -32020
     assert [json.loads(q["body"])["method"] for q in r.upstream_requests()] == ["tools/list"]  # never the call
+    assert r.audit_entries()[-1]["error"].startswith("refused: cannot check the Mcp-Param headers")
+
+
+def test_a_denied_call_sends_nothing_upstream_not_even_a_schema_lookup(rig):
+    r = rig()
+    body = {**forecast("eu"), "params": {"name": "drop_database", "arguments": {"name": "prod"}, "_meta": META}}
+    res = r.post(body, headers={**MODERN, "mcp-name": "drop_database", "mcp-param-name": "prod"})
+    assert res.status_code == 200 and res.json()["result"]["isError"] is True
+    assert r.upstream_requests() == []
 
 
 def test_a_listed_tool_without_annotations_gets_no_mcp_param_headers(rig):
