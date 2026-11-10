@@ -269,6 +269,10 @@ blocked fetch is answered with a JSON-RPC error, as a missing prompt would be. A
 `prompts/get` or `resources/read` is refused (rule `reserved`) whatever the policy says: rules on those names are
 written for those requests and must not judge a tool that took the name.
 
+CI runs the official reference server, `@modelcontextprotocol/server-everything` 2.2.1, behind the guard on stdio and
+over HTTP with the Python SDK client: `get-env` (it prints the server's environment) is hidden and refused,
+`echo` passes, and `args-prompt` is allowed for one state and blocked for another by a rule on `arguments.state`.
+
 `ask` sends the call to a person: `via: tty` asks on the terminal agent-guard was started from, `via: command`
 runs a command with the call as JSON on stdin (exit 0 approves), `via: deny` refuses. With nobody to ask, the
 answer is no.
@@ -388,7 +392,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk,http,otel]'
-pytest -q                      # 197 tests (6 need node)
+pytest -q                      # 201 tests (10 need node)
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on
