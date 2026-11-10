@@ -258,6 +258,26 @@ agent-guard verify audit.jsonl --expect-head c7a5c6bd...   # also catches lines 
 
 If the log cannot be written (disk full), calls are denied. No record, no tool call.
 
+## Traces
+
+Set the usual OpenTelemetry variable and every decision becomes a span in your tracing backend (install the
+`otel` extra: `pip install -e '.[otel]'`):
+
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318   # Jaeger, Tempo, an OTel collector, ...
+agent-guard serve -p guard.yaml --upstream https://mcp.example.com/mcp
+```
+
+The span is `agent-guard tools/call <tool>` with `agent_guard.decision`, `agent_guard.rule` and, for a block, the
+policy's reason. Its parent is the trace the client sends in the request's `_meta` (MCP's W3C `traceparent`, which
+the official SDKs fill in), so the guard shows up inside the agent's own trace: an allowed call has the guard's
+span next to the server's, a blocked one has the guard's span and nothing from the server. A test runs the SDK
+client, the gateway and the SDK server against a stand-in collector and checks exactly that. Spans never carry
+arguments or resource uris, which can hold anything; the audit log, with its scrubber, keeps those. Tracing
+cannot change or fail a decision: a span is written after the decision, any error in it is dropped, and with the
+collector down calls run as before. It costs about 15 us per call (stdio bench: 99 to 105 us added with tracing
+on, 83 to 116 us off).
+
 ## From incident to rule
 
 ```sh
@@ -328,8 +348,8 @@ at most the result lines of calls still in flight; a power cut can lose the last
 ## Development
 
 ```sh
-pip install -e '.[test,sdk,http]'
-pytest -q                      # 173 tests (6 need node)
+pip install -e '.[test,sdk,http,otel]'
+pytest -q                      # 180 tests (6 need node)
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

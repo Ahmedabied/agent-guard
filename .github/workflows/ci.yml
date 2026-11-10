@@ -23,7 +23,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e '.[test,sdk,http]'
+          pip install -e '.[test,sdk,http,otel]'
       - name: Tests
         run: pytest -q
       - name: Example policy regression cases
@@ -48,7 +48,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e '.[test,sdk,http]'
+          pip install -e '.[test,sdk,http,otel]'
           npm install --prefix tests/ts --no-audit --no-fund
       - name: TypeScript SDK clients through the gateway
         env:

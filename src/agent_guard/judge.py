@@ -17,6 +17,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
+from . import tracing
 from .audit import AuditLog, Scrubber
 from .policy import Decision, Policy
 
@@ -299,6 +300,7 @@ class Judge:
     def call(self, msg: dict) -> Verdict:
         """Judge one tools/call (or resources/read). allow means forward it now; ask means call ask() (it blocks)."""
         t0 = time.perf_counter_ns()
+        w0 = time.time_ns() if tracing.enabled() else 0
         msg_id = msg.get("id")
         has_id = "id" in msg
         params = msg.get("params")
@@ -318,6 +320,7 @@ class Judge:
                       "decision": "deny", "rule": "malformed", "reason": bad})
             self._count("denied")
             reply = {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32602, "message": f"agent-guard: {bad}"}}
+            tracing.decision(msg, name, "deny", "malformed", bad, w0)
             return Verdict("deny", name, args, None, reply if has_id else None)
         decision = self._decide(name, readings) if readings else self.policy.evaluate(name, args)
         eval_us = (time.perf_counter_ns() - t0) // 1000
@@ -328,6 +331,7 @@ class Judge:
         logged = self.log(entry)
         if not logged:  # no audit trail, no tool call
             decision = Decision("deny", "audit-unavailable", "the audit log could not be written")
+        tracing.decision(msg, name, decision.action, decision.rule, decision.reason, w0)
         if decision.action == "allow":
             self._count("allowed")
             return Verdict("allow", name, args, decision)
@@ -356,6 +360,7 @@ class Judge:
     def ask(self, msg: dict, verdict: Verdict) -> Verdict:
         """Run the approver for an ask verdict (blocks until it answers) and return allow or deny."""
         name, args, decision = verdict.name, verdict.args, verdict.decision
+        w0 = time.time_ns() if tracing.enabled() else 0
         try:
             ok, how = self.approver(name, args, decision)
         except Exception as e:  # an approver bug must not let a call through
@@ -363,6 +368,7 @@ class Judge:
         msg_id = msg.get("id")
         if not self.log({"event": "approval", "id": msg_id, "tool": name, "approved": ok, "how": how}):
             ok, how = False, "the audit log could not be written"
+        tracing.decision(msg, name, "allow" if ok else "deny", decision.rule, how, w0, approval=ok)
         if ok:
             self.policy.charge(decision)
             return Verdict("allow", name, args, decision)

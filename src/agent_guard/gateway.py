@@ -21,6 +21,7 @@ own credentials with --upstream-header NAME=ENVVAR (the value is read from the e
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
 import os
@@ -174,7 +175,18 @@ class Gateway:
         )
         self.param_maps: dict[str, dict] = {}  # tool name -> argument path -> Mcp-Param header token
         self._missed: dict[str, float] = {}  # tool name -> when the server last did not list it
-        self.app = Starlette(routes=[Route(PATH, self.handle, methods=["GET", "POST", "DELETE"])])
+        self.on_shutdown: list = []  # run when the server stops (uvicorn re-raises SIGTERM after, so not later)
+        self.app = Starlette(routes=[Route(PATH, self.handle, methods=["GET", "POST", "DELETE"])], lifespan=self._life)
+
+    @contextlib.asynccontextmanager
+    async def _life(self, app):
+        yield
+        await self.client.aclose()
+        for fn in self.on_shutdown:
+            try:
+                await anyio.to_thread.run_sync(fn)
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---- checks ---------------------------------------------------------------------------
 

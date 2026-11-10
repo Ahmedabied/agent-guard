@@ -40,9 +40,13 @@ def cmd_run(a) -> int:
     log_path = _audit_path(policy, policy_path, a.log)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     scrub = Scrubber(policy.audit.get("redact"), int(policy.audit.get("max_value_chars", 2000)))
+    from . import tracing
+
+    tracing.setup()
     with AuditLog(log_path, fsync=bool(policy.audit.get("fsync", False))) as audit:
         proxy = Proxy(policy, a.command, audit=audit, scrub=scrub, approver=make_approver(policy.ask), quiet=a.quiet)
         code = proxy.run()
+    tracing.shutdown()  # os._exit below skips atexit, so the last spans are sent here
     # The client reader thread may still be blocked on stdin, holding its buffer lock. A normal
     # interpreter exit would abort on that lock, so flush what matters and leave directly.
     try:
@@ -59,6 +63,7 @@ def cmd_serve(a) -> int:
         print(f"agent-guard serve needs the http extra ({e.name} is missing): pip install -e '.[http]' in a clone, "
               "or pip install 'agent-guard[http] @ git+https://github.com/Ahmedabied/agent-guard'", file=sys.stderr)
         return 2
+    from . import tracing
     from .judge import Judge, make_approver
 
     try:
@@ -76,6 +81,8 @@ def cmd_serve(a) -> int:
 
             judge = Judge(policy, audit, scrub, make_approver(policy.ask), say=say)
             gateway = Gateway(judge, a.upstream, port, headers, max_body=a.max_body, allow_origins=a.allow_origin)
+            if tracing.setup():
+                gateway.on_shutdown.append(tracing.shutdown)  # sends the last spans before the process ends
             return serve(gateway, host, quiet=a.quiet)
     except GatewayError as e:
         print(f"agent-guard serve: {e}", file=sys.stderr)

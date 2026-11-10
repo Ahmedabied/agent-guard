@@ -36,5 +36,17 @@ def forecast(region: Annotated[str, Field(json_schema_extra={"x-mcp-header": "Re
 
 
 if __name__ == "__main__":
+    import os
+
+    if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):  # the SDK server makes a span per request once this is set
+        from opentelemetry import trace
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+        provider = TracerProvider(resource=Resource.create({"service.name": "sdk-demo-server"}))
+        provider.add_span_processor(SimpleSpanProcessor(OTLPSpanExporter()))
+        trace.set_tracer_provider(provider)
     server.run(transport="streamable-http", host="127.0.0.1", port=int(sys.argv[1]),
                json_response=sys.argv[2:3] == ["json"])
