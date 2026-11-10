@@ -293,7 +293,7 @@ def parse_rate(text: Any, where: str) -> tuple[int, float]:
 
 
 class Rule:
-    __slots__ = ("name", "action", "reason", "tool_rx", "conditions", "rate", "hits")
+    __slots__ = ("name", "action", "reason", "tool_rx", "tool_names", "conditions", "rate", "hits")
 
     def __init__(self, spec: Any, index: int):
         where = f"rules[{index}]"
@@ -310,6 +310,7 @@ class Rule:
         self.reason = str(spec.get("reason") or f"matched rule {self.name}")
         tool = spec.get("tool")
         self.tool_rx = None if tool in (None, "*") else _glob_rx(_as_list(tool), f"{where} tool")
+        self.tool_names = () if tool in (None, "*") else tuple(t for t in _as_list(tool) if isinstance(t, str))
         args = spec.get("args") or {}
         if not isinstance(args, dict):
             raise PolicyError(f"{where}: args must be a mapping of argument name to condition")
@@ -382,6 +383,10 @@ class Policy:
             if r.name in seen:
                 raise PolicyError(f"{source}: two rules are named {r.name!r}; names must be unique")
             seen.add(r.name)
+            for flag, request in (("guard_resources", "resources/read"), ("guard_prompts", "prompts/get")):
+                if request in r.tool_names and not getattr(self, flag):  # the rule would never run: a silent hole
+                    raise PolicyError(f"{source}: rule {r.name!r} is for {request}, but {flag} is off, so it would "
+                                      f"never run; set {flag}: true or remove the rule")
         self._lock = threading.Lock()
 
     @classmethod
