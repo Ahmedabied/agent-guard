@@ -483,6 +483,17 @@ def test_sdk_prompts_are_judged_over_http(rig, mode, answers):
     assert verify(r.audit).ok
 
 
+@pytest.mark.parametrize("judged, routed", [("review", "leak_env"), ("leak_env", "review")])
+def test_a_prompts_mcp_name_must_match_the_prompt_judged(rig, judged, routed):
+    # A server that routes on Mcp-Name would serve a different prompt than the policy saw: refused either way round.
+    r = rig(policy=PROMPT_POLICY)
+    body = {"jsonrpc": "2.0", "id": 9, "method": "prompts/get", "params": {"name": judged, "_meta": META}}
+    res = r.post(body, headers={"mcp-protocol-version": "2026-07-28", "mcp-method": "prompts/get", "mcp-name": routed})
+    error = res.json()["error"]
+    assert res.status_code == 400 and error["code"] == -32020 and "Mcp-Name" in error["message"]
+    assert r.upstream_requests() == []
+
+
 def test_a_modern_prompts_get_is_sent_once_with_no_mcp_param_headers(rig):
     # Mcp-Param headers belong to tools/call: a prompt named like a tool must not cause a tools/list lookup or carry
     # that tool's headers, and a client's own copies are dropped as always.
