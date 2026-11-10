@@ -320,6 +320,12 @@ cannot change or fail a decision: a span is written after the decision, any erro
 collector down calls run as before. It costs about 15 us per call (stdio bench: 99 to 105 us added with tracing
 on, 83 to 116 us off).
 
+**With agent-otel.** [agent-otel](https://github.com/Ahmedabied/agent-otel) records the agent's side of the same
+run: the run itself, each model call with its tokens and cost, each tool call. The two need no glue between them.
+The tool call's span is the current one when the SDK client sends the request, so the guard's decision hangs under
+it, and one trace shows what the agent tried, what the guard decided and what the server did. A test runs the two
+together and checks that shape (`tests/test_tracing.py`).
+
 ## From incident to rule
 
 ```sh
@@ -399,7 +405,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk,http,otel]'
-pytest -q                      # 213 tests (10 need node)
+pytest -q                      # 214 tests (10 need node, 1 needs agent-otel)
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

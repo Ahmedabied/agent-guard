@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -150,15 +151,31 @@ def test_tracing_errors_never_change_a_decision():
 
 # ---- one trace across the agent, the guard and the server --------------------------------------------------------
 
-def test_agent_guard_and_server_in_one_trace(tmp_path):
-    pytest.importorskip("mcp")
-    pytest.importorskip("opentelemetry.exporter.otlp.proto.http")
-    from test_gateway import Rig, free_port, wait_port
-    from opentelemetry import trace
-    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+CALLS = (("read_file", {"path": "/srv/a"}), ("drop_database", {"name": "prod"}))  # the rig allows one, denies one
+_client = None
 
-    import anyio
-    from mcp.client.client import Client
+
+def client_tracing():
+    """The agent's own tracing, shared by the tests below: OpenTelemetry lets the global provider be set once per
+    process. The SDK client puts the span that is current into each request's _meta."""
+    global _client
+    from opentelemetry import trace
+
+    if _client is None:
+        exporter, provider = InMemorySpanExporter(), TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+        _client = (provider, exporter)
+    _client[1].clear()
+    return _client
+
+
+@contextmanager
+def one_trace(tmp_path):
+    """The gateway in front of an SDK server, both exporting to a stand-in collector. Gives the rig and a dict that
+    holds, once the block ends, what the two of them sent: trace id -> [(service, span name, span id, parent id)]."""
+    from test_gateway import Rig, free_port, wait_port
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
     port, out = free_port(), tmp_path / "otlp.b64"
     collector = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(__file__), "fake_collector.py"),
@@ -172,22 +189,9 @@ def test_agent_guard_and_server_in_one_trace(tmp_path):
     finally:
         for k, v in old.items():
             os.environ.pop(k) if v is None else os.environ.__setitem__(k, v)
-    client_spans = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(client_spans))
-    tracer = provider.get_tracer("agent")
-    trace.set_tracer_provider(provider)  # the SDK client puts this trace into each request's _meta
-    ids = {}
-
-    async def session():
-        async with Client(r.url, mode="auto") as c:
-            for name, args in (("read_file", {"path": "/srv/a"}), ("drop_database", {"name": "prod"})):
-                with tracer.start_as_current_span(f"agent step {name}") as step:
-                    ids[name] = format(step.get_span_context().trace_id, "032x")
-                    await c.call_tool(name, args)
-
+    seen: dict = {}
     try:
-        anyio.run(session)
+        yield r, seen
     finally:
         r.close()  # both flush their spans on the way out
         for _ in range(50):
@@ -196,17 +200,78 @@ def test_agent_guard_and_server_in_one_trace(tmp_path):
             time.sleep(0.1)
         collector.terminate()
         collector.wait()
-    seen = {}
-    for line in out.read_text().split():
-        req = ExportTraceServiceRequest.FromString(base64.b64decode(line))
-        for rs in req.resource_spans:
-            service = next(a.value.string_value for a in rs.resource.attributes if a.key == "service.name")
-            for ss in rs.scope_spans:
-                for s in ss.spans:
-                    seen.setdefault(s.trace_id.hex(), []).append((service, s.name))
-    assert ("agent-guard", "agent-guard tools/call read_file") in seen[ids["read_file"]]
-    assert ("sdk-demo-server", "tools/call read_file") in seen[ids["read_file"]]
-    assert seen[ids["drop_database"]] == [("agent-guard", "agent-guard tools/call drop_database")]  # no server span
+        for line in out.read_text().split() if out.exists() else ():
+            req = ExportTraceServiceRequest.FromString(base64.b64decode(line))
+            for rs in req.resource_spans:
+                service = next(a.value.string_value for a in rs.resource.attributes if a.key == "service.name")
+                for ss in rs.scope_spans:
+                    for s in ss.spans:
+                        seen.setdefault(s.trace_id.hex(), []).append(
+                            (service, s.name, s.span_id.hex(), s.parent_span_id.hex()))
+
+
+def test_agent_guard_and_server_in_one_trace(tmp_path):
+    pytest.importorskip("mcp")
+    pytest.importorskip("opentelemetry.exporter.otlp.proto.http")
+    import anyio
+    from mcp.client.client import Client
+
+    tracer = client_tracing()[0].get_tracer("agent")
+    ids = {}
+
+    async def session(url):
+        async with Client(url, mode="auto") as c:
+            for name, args in CALLS:
+                with tracer.start_as_current_span(f"agent step {name}") as step:
+                    ids[name] = format(step.get_span_context().trace_id, "032x")
+                    await c.call_tool(name, args)
+
+    with one_trace(tmp_path) as (r, seen):
+        anyio.run(session, r.url)
+    names = {t: [(service, name) for service, name, _, _ in spans] for t, spans in seen.items()}
+    assert ("agent-guard", "agent-guard tools/call read_file") in names[ids["read_file"]]
+    assert ("sdk-demo-server", "tools/call read_file") in names[ids["read_file"]]
+    assert names[ids["drop_database"]] == [("agent-guard", "agent-guard tools/call drop_database")]  # no server span
+
+
+def test_with_agent_otel_a_decision_hangs_under_the_tool_call_that_caused_it(tmp_path):
+    """agent-otel (github.com/Ahmedabied/agent-otel) records the agent's side of a run: the run, its model calls and
+    its tool calls. The tool span is the current one when the SDK client sends the call, so the guard's decision
+    lands under it with no glue between the two: one trace says what the agent tried and what the guard decided."""
+    ao = pytest.importorskip("agent_otel")
+    pytest.importorskip("mcp")
+    pytest.importorskip("opentelemetry.exporter.otlp.proto.http")
+    import anyio
+    from mcp.client.client import Client
+
+    provider, exporter = client_tracing()
+    ao.configure(tracer_provider=provider)
+
+    async def session(url):
+        async with Client(url, mode="auto") as c:
+            with ao.agent("ops-agent"):
+                for name, args in CALLS:
+                    with ao.tool_call(name):
+                        await c.call_tool(name, args)
+
+    try:
+        with one_trace(tmp_path) as (r, seen):
+            anyio.run(session, r.url)
+    finally:
+        ao.configure()
+    agent_side = {s.name: s for s in exporter.get_finished_spans()}
+    parent_of = {format(s.context.span_id, "016x"): format(s.parent.span_id, "016x") if s.parent else ""
+                 for s in exporter.get_finished_spans()}
+    run = agent_side["invoke_agent ops-agent"]
+    sent = seen[format(run.context.trace_id, "032x")]  # the whole run is one trace
+    for name in ("read_file", "drop_database"):
+        tool = format(agent_side[f"execute_tool {name}"].context.span_id, "016x")
+        up = next(parent for _, span, _, parent in sent if span == f"agent-guard tools/call {name}")
+        while up in parent_of and up != tool:  # past any span the SDK client made for the request itself
+            up = parent_of[up]
+        assert up == tool
+    assert ("sdk-demo-server", "tools/call read_file") in [(service, span) for service, span, _, _ in sent]
+    assert not [span for service, span, _, _ in sent if service == "sdk-demo-server" and "drop_database" in span]
 
 
 def test_a_collector_that_is_down_changes_nothing(tmp_path):
