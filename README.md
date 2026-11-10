@@ -169,7 +169,7 @@ checks (`tests/test_ts_clients.py`).
 
 Checked against a real remote server, DeepWiki's public one (`https://mcp.deepwiki.com/mcp`, no key), with the
 official MCP Python SDK client in both handshakes and a policy that denies `ask_question`: the tool disappears
-from the list, a call to it is answered by the gateway, `read_wiki_structure` goes through (about 0.4 s, the
+from the list, a call to it is answered by the gateway, `read_wiki_structure` goes through (0.4 to 0.5 s, the
 server's own time), and `agent-guard verify` reads the log as intact.
 
 ## The policy
@@ -324,8 +324,9 @@ directly and once through agent-guard with the example policy and a real audit l
 Five runs on an Intel i5-14400F, Python 3.12, with the machine busy (load 3.4). Most of the added time is the two
 extra pipe hops and thread wake-ups, not the checks: the policy is 3.6 us and the audit write about 12 us.
 Over HTTP (`python bench/bench_http.py --calls 2000`, the SDK demo server on 2026-07-28 with JSON answers), the
-gateway adds about 0.7 ms per call: 0.68 to 0.72 ms (median) over five runs on Python 3.13, next to 0.60 to
-0.63 ms for the server's own round trip. That is one more HTTP server and client hop on loopback; against a remote server it is small next to
+gateway adds about 0.75 ms per call: 0.74 to 0.79 ms (median) over five runs on Python 3.13, next to 0.61 to
+0.62 ms for the server's own round trip. About 60 us of that is watching each request for its client leaving,
+so a cancel reaches the server (added in 0.3.1; before it, 0.68 to 0.72 ms). That is one more HTTP server and client hop on loopback; against a remote server it is small next to
 the network.
 
 Every call is written to the log before it is forwarded. With fsync off, a crash of agent-guard itself can lose
