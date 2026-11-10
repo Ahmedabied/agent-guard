@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-guard"
-version = "0.4.2"
+version = "0.5.0"
 description = "Guardrails as code for AI agents: a policy proxy and HTTP gateway in front of MCP servers, with a hash-chained audit log."
 readme = "README.md"
 license = "MIT"

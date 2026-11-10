@@ -110,7 +110,11 @@ def test_turning_a_guard_off_fails_the_cases_that_need_it(tmp_path, flag, tool, 
     learn(policy, tests, Incident(tool, args, "test"), "no-this", "never")
     cases = load_cases(tests)
     assert run_cases(policy, cases) == []
-    policy.write_text(policy.read_text().replace(f"{flag}: true\n", ""))
+    learned = policy.read_text()
+    policy.write_text(learned.replace(f"{flag}: true\n", ""))  # the learned rule is still there: it would never run
+    with pytest.raises(PolicyError, match=f"{flag} is off"):
+        run_cases(policy, cases)
+    policy.write_text(POLICY)  # rule gone too: the case itself catches it
     failures = run_cases(policy, cases)
     assert [(f[1], f[2]) for f in failures] == [("allow", "unguarded")]
 
@@ -123,6 +127,15 @@ def test_check_says_a_prompt_passes_when_its_guard_is_off(tmp_path):
     policy.write_text(POLICY.replace("default: deny\n", "default: deny\nguard_prompts: true\n"))
     on = cli("check", "-p", str(policy), "prompts/get", '{"name": "dump_env"}')
     assert on.returncode == 1 and "rule=default" in on.stdout
+
+
+@pytest.mark.parametrize("tool, flag", [("prompts/get", "guard_prompts"), ("resources/read", "guard_resources"),
+                                        ("[read_file, prompts/get]", "guard_prompts")])
+def test_a_rule_its_guard_would_never_run_stops_the_policy_loading(tool, flag):
+    with pytest.raises(PolicyError, match=f"rule 'r' is for .*{flag} is off"):
+        Policy.from_yaml(f"default: allow\nrules:\n  - {{name: r, tool: {tool}, decision: deny}}\n")
+    assert Policy.from_yaml(f"default: allow\n{flag}: true\nrules:\n  - {{name: r, tool: {tool}, decision: deny}}\n")
+    assert Policy.from_yaml("default: allow\nrules:\n  - {name: r, tool: \"*\", decision: deny}\n")  # a pattern is fine
 
 
 def test_learn_refuses_a_rule_its_guard_would_never_run(tmp_path):
