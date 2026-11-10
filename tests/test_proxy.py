@@ -393,6 +393,21 @@ def test_secret_prompt_arguments_are_scrubbed_in_the_log(tmp_path):
     assert call["args"]["arguments"] == {"api_key": "[redacted]", "note": "[redacted: looks like a secret]"}
 
 
+@pytest.mark.parametrize("policy", ["default: allow\nhide_denied_tools: true\nrules: []\n",
+                                    "default: deny\nhide_denied_tools: true\nguard_prompts: true\nguard_resources: true\n"
+                                    "rules:\n  - {name: all, tool: [prompts/get, resources/read, read_file], decision: allow}\n"])
+def test_a_tool_named_like_a_guarded_request_is_hidden_from_tools_list(policy):
+    # Every call to it is refused (rule reserved), so it can never pass: hide it like any other such tool, even when
+    # a rule allows that name for the requests it stands for.
+    from agent_guard.judge import Judge
+    from agent_guard.policy import Policy
+
+    item = {"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": n} for n in
+                                                            ("read_file", "prompts/get", "resources/read")]}}
+    assert Judge(Policy.from_yaml(policy)).filter_tools(item) is True
+    assert [t["name"] for t in item["result"]["tools"]] == ["read_file"]
+
+
 PROMPT_ASK = """
 default: deny
 guard_prompts: true

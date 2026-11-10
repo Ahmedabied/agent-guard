@@ -268,8 +268,8 @@ filled in), so a rule can allow some prompts or deny one by an argument:
 The prompt's arguments stay under `arguments`, so an argument called `name` cannot pass for the prompt's name, and
 the audit log scrubs secrets there as it does for tool arguments. A blocked fetch is answered with a JSON-RPC
 error, as a missing prompt would be. A `tools/call` to a tool named `prompts/get` or `resources/read` is refused
-(rule `reserved`) whatever the policy says: rules on those names are written for those requests and must not judge
-a tool that took the name.
+(rule `reserved`) whatever the policy says, and with `hide_denied_tools` it is not listed: rules on those names are
+written for those requests and must not judge a tool that took the name.
 
 CI runs the official reference server, `@modelcontextprotocol/server-everything` 2.2.1, behind the guard on stdio and
 over HTTP with the Python SDK client: `get-env` (it prints the server's environment) is hidden and refused,
@@ -394,7 +394,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk,http,otel]'
-pytest -q                      # 207 tests (10 need node)
+pytest -q                      # 209 tests (10 need node)
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

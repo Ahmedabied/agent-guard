@@ -413,13 +413,14 @@ class Judge:
         return {"jsonrpc": "2.0", "id": msg.get("id"), "result": result}
 
     def filter_tools(self, item: dict) -> bool:
-        """Drop tools the policy always denies from a tools/list result. True if any were dropped."""
+        """Drop tools that can never pass from a tools/list result: the ones the policy always denies, and any named
+        like a guarded request (every call to those is refused as reserved). True if any were dropped."""
         res = item.get("result")
         if not isinstance(res, dict) or not isinstance(res.get("tools"), list):
             return False
         before = res["tools"]
         res["tools"] = [t for t in before if not (isinstance(t, dict) and isinstance(t.get("name"), str)
-                                                   and self.policy.always_denied(t["name"]))]
+                                                   and (t["name"] in RESERVED or self.policy.always_denied(t["name"])))]
         return len(res["tools"]) != len(before)
 
     def result(self, msg_id: Any, name: str, t0: int, item: dict) -> None:
