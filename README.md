@@ -121,7 +121,11 @@ A gateway is a new way in, so it refuses more than the stdio proxy has to:
 
 What the server receives is built by the gateway: the body is re-serialised from the parse the policy judged, and
 only MCP's own headers are copied (`Accept`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`,
-`Mcp-Param-*`, `Last-Event-ID`). The client's `Authorization` and cookies are never forwarded; the server's key
+`Last-Event-ID`). `Mcp-Param-*` headers (2026-07-28: tool arguments the schema marks with `x-mcp-header`, mirrored
+so a load balancer can route on them) are never copied from the client. The gateway learns each tool's schema from
+the `tools/list` answers it passes on (or asks the server itself the first time it meets a tool) and writes the
+headers from the judged arguments, with the same rules as the official SDK (checked against its own functions in
+the tests). So whatever routes on `Mcp-Param-Region` sees the region the policy saw, and a forged one is replaced. The client's `Authorization` and cookies are never forwarded; the server's key
 comes from `--upstream-header NAME=ENVVAR`, read from the environment so it is not on the command line, and no
 header value is ever written to the audit log. Each of these refusals has a test that sends the request and then
 checks the server never saw it.
@@ -270,10 +274,8 @@ at most the result lines of calls still in flight; a power cut can lose the last
 - **HTTP: no OAuth through the gateway yet.** A client that discovers OAuth from the URL it is given would ask
   the gateway, which does not answer it. Servers with no auth or a fixed key (`--upstream-header`) work. The
   gateway also has no login of its own, which is why it only listens on loopback.
-- **HTTP: `Mcp-Param-*` headers are passed as the client sent them.** They mirror tool arguments the server's
-  schema marks with `x-mcp-header`, and the guard judges the arguments in the body. The spec makes the server
-  reject a header that disagrees with its argument; a server that skips that check and acts on the header could
-  be steered past a rule on that argument.
+- **HTTP: `Mcp-Param-*` for a tool the server does not list** cannot be built, so a call that carries them is
+  refused (a call without them goes on, and a 2026-07-28 server refuses it if the tool needs them).
 - **HTTP: one message per POST.** JSON-RPC batches are refused (the 2025-06-18 revision removed them).
 - **`tools/call` is judged, and `resources/read` with `guard_resources: true`.** Without it resource reads pass
   through untouched; prompts and sampling requests always do.
@@ -297,7 +299,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk,http]'
-pytest -q                      # 132 tests
+pytest -q                      # 162 tests
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

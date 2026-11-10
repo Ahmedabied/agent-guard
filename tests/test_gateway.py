@@ -25,7 +25,7 @@ hide_denied_tools: true
 rules:
   - {name: no-etc, tool: delete_file, args: {path: {under: /etc}}, decision: deny, reason: nothing under /etc}
   - {name: burst, tool: read_file, rate: 5/minute, decision: deny, reason: more than 5 reads a minute}
-  - {name: files, tool: [read_file, delete_file, "lire_*"], decision: allow}
+  - {name: files, tool: [read_file, delete_file, "lire_*", forecast], decision: allow}
 """
 CALL = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "read_file", "arguments": {"path": "/a"}}}
 
@@ -133,7 +133,7 @@ def test_sdk_client_through_gateway(rig, mode, answers):
             seen["drop"] = await c.call_tool("drop_database", {"name": "prod"})
 
     anyio.run(session)
-    assert seen["tools"] == ["delete_file", "read_file"]  # drop_database is hidden
+    assert seen["tools"] == ["delete_file", "forecast", "read_file"]  # drop_database is hidden
     assert not seen["read"].is_error and seen["read"].content[0].text == "contents of /srv/a.txt"
     assert seen["delete"].is_error and "nothing under /etc" in seen["delete"].content[0].text
     assert seen["drop"].is_error and "default is deny" in seen["drop"].content[0].text
@@ -157,7 +157,8 @@ def test_upstream_gets_the_judged_message_and_only_mcp_headers(rig):
     assert got["body"] == raw.decode()  # re-serialised from the parse the policy judged
     assert headers["authorization"] == "Bearer upstream-secret-1"  # the client's own token is never forwarded
     assert "cookie" not in headers and "x-forwarded-for" not in headers
-    assert headers["mcp-session-id"] == "session-secret-4" and headers["mcp-param-region"] == "eu"
+    assert headers["mcp-session-id"] == "session-secret-4"
+    assert "mcp-param-region" not in headers  # the gateway builds these itself, and only on 2026-07-28
     log = r.audit.read_text()
     for secret in ("upstream-secret-1", "client-secret-2", "cookie-secret-3", "session-secret-4"):
         assert secret not in log
@@ -173,7 +174,73 @@ def test_sse_answers_pass_through_with_the_result_logged(rig):
     assert [(e["event"], e.get("ok")) for e in r.audit_entries()] == [("call", None), ("result", True)]
     listed = r.post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     data = [e for e in listed.text.split("\n\n") if e.startswith("event: message\nid: 7")][0]
-    assert [t["name"] for t in json.loads(data.split("data: ", 1)[1])["result"]["tools"]] == ["read_file"]
+    assert [t["name"] for t in json.loads(data.split("data: ", 1)[1])["result"]["tools"]] == ["read_file", "forecast"]
+
+
+# ---- Mcp-Param headers (2026-07-28) ----------------------------------------------------------------------------
+
+META = {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}
+MODERN = {"mcp-protocol-version": "2026-07-28", "mcp-method": "tools/call", "mcp-name": "forecast"}
+
+
+def forecast(region, i=1):
+    return {"jsonrpc": "2.0", "id": i, "method": "tools/call",
+            "params": {"name": "forecast", "arguments": {"region": region}, "_meta": META}}
+
+
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+def test_sdk_mcp_param_headers_are_rebuilt_so_the_server_accepts_them(rig, mode):
+    pytest.importorskip("mcp")
+    from mcp.client.client import Client
+
+    r = rig(upstream="sdk", mode="json")
+    seen = {}
+
+    async def session():
+        async with Client(r.url, mode=mode) as c:
+            seen["r"] = await c.call_tool("forecast", {"region": "eu-west é", "days": 3})
+
+    anyio.run(session)  # on 2026-07-28 the SDK server refuses a call whose Mcp-Param headers are missing or wrong
+    assert not seen["r"].is_error and seen["r"].content[0].text == "sunny in eu-west é for 3 days"
+
+
+def test_a_forged_mcp_param_header_is_replaced_by_the_judged_value(rig):
+    r = rig()
+    listed = r.post({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": META}},
+                    headers={"mcp-protocol-version": "2026-07-28", "mcp-method": "tools/list"})
+    assert listed.status_code == 200
+    res = r.post(forecast("eu", 2), headers={**MODERN, "mcp-param-region": "us"})
+    assert res.status_code == 200 and res.json()["result"]["content"][0]["text"] == "ran forecast"
+    calls = [q for q in r.upstream_requests() if '"tools/call"' in q["body"]]
+    assert [[v for k, v in q["headers"] if k == "mcp-param-region"] for q in calls] == [["eu"]]
+    assert sum('"tools/list"' in q["body"] for q in r.upstream_requests()) == 1  # learned from the client's list
+
+
+def test_the_gateway_looks_up_a_schema_it_has_not_seen(rig):
+    r = rig()
+    res = r.post(forecast("åland"), headers={**MODERN, "mcp-param-region": "anything"})
+    assert res.status_code == 200
+    first, call = r.upstream_requests()
+    assert json.loads(first["body"])["method"] == "tools/list" and json.loads(first["body"])["params"] == {"_meta": META}
+    from agent_guard.params import decode
+    assert decode(dict(call["headers"])["mcp-param-region"]) == "åland"
+
+
+def test_mcp_param_headers_for_a_tool_the_server_does_not_list_are_refused(rig):
+    r = rig()
+    body = {**forecast("eu"), "params": {"name": "lire_secret", "arguments": {"path": "/a"}, "_meta": META}}
+    res = r.post(body, headers={**MODERN, "mcp-name": "lire_secret", "mcp-param-path": "/etc/passwd"})
+    assert res.status_code == 400 and res.json()["error"]["code"] == -32020
+    assert [json.loads(q["body"])["method"] for q in r.upstream_requests()] == ["tools/list"]  # never the call
+
+
+def test_a_listed_tool_without_annotations_gets_no_mcp_param_headers(rig):
+    r = rig()
+    res = r.post(CALL | {"params": {**CALL["params"], "_meta": META}},
+                 headers={**MODERN, "mcp-name": "read_file", "mcp-param-path": "/etc/passwd"})
+    assert res.status_code == 200
+    call = [q for q in r.upstream_requests() if '"tools/call"' in q["body"]][0]
+    assert not [k for k, _ in call["headers"] if k.startswith("mcp-param-")]
 
 
 # ---- refusals: none of them reaches the upstream ----------------------------------------------------------------

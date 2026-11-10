@@ -33,6 +33,8 @@ async def handle(request: Request) -> Response:
         result = {"content": [{"type": "text", "text": f"ran {msg['params']['name']}"}], "isError": False}
     elif msg.get("method") == "tools/list":
         result = {"tools": [{"name": n, "inputSchema": {"type": "object"}} for n in ("read_file", "drop_database")]}
+        result["tools"].append({"name": "forecast", "inputSchema": {"type": "object", "properties": {
+            "region": {"type": "string", "x-mcp-header": "Region"}}}})
     else:
         result = {}
     answer = json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result})

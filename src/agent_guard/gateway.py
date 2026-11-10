@@ -21,12 +21,9 @@ own credentials with --upstream-header NAME=ENVVAR (the value is read from the e
 
 from __future__ import annotations
 
-import base64
-import binascii
 import ipaddress
 import json
 import os
-import re
 import sys
 import time
 from typing import Any, AsyncIterator
@@ -39,6 +36,7 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
+from . import params
 from .judge import Judge, _line, parse_strict, recover_id
 
 PATH = "/mcp"
@@ -48,6 +46,7 @@ NAME_PARAM = {"tools/call": "name", "prompts/get": "name", "resources/read": "ur
 ROUTING = ("mcp-method", "mcp-name", "mcp-protocol-version")
 VERSION_META = "io.modelcontextprotocol/protocolVersion"
 HEADER_MISMATCH = -32020  # the MCP SDK's code for a routing header that disagrees with the body
+MODERN = "2026-07-28"  # from this version on, requests carry routing headers and Mcp-Param-* headers
 
 # Request headers copied to the upstream. Everything else (Cookie, Authorization, Forwarded, hop-by-hop) stays here.
 COPY_REQUEST = ("accept", "mcp-session-id", "mcp-protocol-version", "mcp-method", "mcp-name", "last-event-id")
@@ -78,23 +77,36 @@ def check_upstream(url: str) -> str:
     return url
 
 
-def decode_header_value(value: str) -> str | None:
-    """The MCP header value codec: printable ASCII as is, anything else as =?base64?...?= (None if malformed)."""
-    m = re.fullmatch(r"=\?base64\?(.*)\?=", value)
-    if m is None:
-        return value
-    try:
-        raw = base64.b64decode(m.group(1), validate=True)
-        if base64.b64encode(raw).decode("ascii") != m.group(1):
-            return None
-        return raw.decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError):
-        return None
-
-
 def _error(msg_id: Any, code: int, message: str, status: int) -> Response:
     body = {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": f"agent-guard: {message}"}}
     return Response(_line(body), status_code=status, media_type="application/json")
+
+
+def _answer(data: bytes, ctype: str, req_id: str) -> Any:
+    """The result for req_id in a JSON or SSE answer, or None."""
+    text = data.decode("utf-8", "replace")
+    payloads = _sse_data(text) if ctype.split(";")[0].strip().lower() == "text/event-stream" else [text]
+    for payload in payloads:
+        try:
+            item = json.loads(payload)
+        except ValueError:
+            continue
+        if isinstance(item, dict) and item.get("id") == req_id:
+            return item.get("result")
+    return None
+
+
+def _sse_data(stream: str) -> list[str]:
+    """The data payload of each event in an SSE stream."""
+    out, data = [], []
+    for line in stream.replace("\r\n", "\n").split("\n") + [""]:
+        if not line:
+            if data:
+                out.append("\n".join(data))
+            data = []
+        elif line.startswith("data:"):
+            data.append(line[6:] if line[5:6] == " " else line[5:])
+    return out
 
 
 def _plain(status: int, text: str) -> Response:
@@ -103,12 +115,13 @@ def _plain(status: int, text: str) -> Response:
 
 class Watch:
     """What one POST is waiting for in the upstream's answer: the result of an allowed call (to log it) and a
-    tools/list result (to hide denied tools)."""
+    tools/list result (to learn the tools' schemas and hide denied tools)."""
 
-    def __init__(self, judge: Judge, call: tuple | None, list_id: str | None):
+    def __init__(self, judge: Judge, call: tuple | None, list_id: str | None, learn=None):
         self.judge = judge
         self.call = call  # (key, id, name, t0) of an allowed call
         self.list_id = list_id
+        self.learn = learn  # takes a tools/list result: the schemas say which arguments go into Mcp-Param headers
         self.logged = False
 
     def inspect(self, item: Any) -> bool:
@@ -120,7 +133,9 @@ class Watch:
             self.logged = True
             self.judge.result(self.call[1], self.call[2], self.call[3], item)
         if self.list_id is not None and key == self.list_id:
-            return self.judge.filter_tools(item)
+            if self.learn and isinstance(item.get("result"), dict):
+                self.learn(item["result"])
+            return self.judge.policy.hide_denied_tools and self.judge.filter_tools(item)
         return False
 
     def unanswered(self, why: str) -> None:
@@ -153,6 +168,7 @@ class Gateway:
             follow_redirects=False,
             timeout=httpx2.Timeout(connect=connect_timeout, read=None, write=30, pool=connect_timeout),
         )
+        self.param_maps: dict[str, dict] = {}  # tool name -> argument path -> Mcp-Param header token
         self.app = Starlette(routes=[Route(PATH, self.handle, methods=["GET", "POST", "DELETE"])])
 
     # ---- checks ---------------------------------------------------------------------------
@@ -177,8 +193,8 @@ class Gateway:
         name = request.headers.get("mcp-name")
         if name is not None:
             key = NAME_PARAM.get(msg.get("method"))
-            params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
-            if key is None or decode_header_value(name) != params.get(key):
+            body = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+            if key is None or params.decode(name) != body.get(key):
                 return "Mcp-Name does not match the body"
         version = request.headers.get("mcp-protocol-version")
         meta = (msg.get("params") or {}).get("_meta") if isinstance(msg.get("params"), dict) else None
@@ -187,12 +203,78 @@ class Gateway:
             return "MCP-Protocol-Version does not match the body's version"
         return ""
 
-    def _headers(self, request: Request, post: bool) -> dict[str, str]:
-        out = {k: v for k, v in request.headers.items() if k in COPY_REQUEST or k.startswith("mcp-param-")}
+    def _headers(self, request: Request, post: bool, extra: dict[str, str] | None = None) -> dict[str, str]:
+        # The client's Mcp-Param-* headers are never copied: the gateway builds its own from the judged arguments.
+        out = {k: v for k, v in request.headers.items() if k in COPY_REQUEST}
+        out.update(extra or {})
         out.update(self.upstream_headers)
         if post:
             out["content-type"] = "application/json"
         return out
+
+    # ---- Mcp-Param headers ----------------------------------------------------------------
+
+    def learn(self, result: dict) -> None:
+        for tool in result.get("tools") or []:
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str):
+                self.param_maps[tool["name"]] = params.header_map(tool.get("inputSchema"))
+
+    @staticmethod
+    def _version(request: Request, msg: dict) -> str:
+        meta = msg.get("params", {}).get("_meta") if isinstance(msg.get("params"), dict) else None
+        version = request.headers.get("mcp-protocol-version") or (meta.get(VERSION_META) if isinstance(meta, dict)
+                                                                   else None)
+        return version if isinstance(version, str) else ""
+
+    async def _param_headers(self, request: Request, msg: dict) -> tuple[dict[str, str], str]:
+        """The Mcp-Param headers for a 2026-07-28 tools/call, built from its arguments, and why not ('' if fine).
+        A tool whose schema the gateway has not seen is looked up with tools/list first."""
+        body = msg.get("params")
+        name = body.get("name") if isinstance(body, dict) else None
+        args = body.get("arguments") if isinstance(body, dict) else None
+        if not isinstance(name, str) or not isinstance(args, (dict, type(None))):
+            return {}, ""  # malformed: the judge denies it
+        if name not in self.param_maps:
+            await self._fetch_tools(request, msg)
+        hmap = self.param_maps.get(name)
+        if hmap is None:
+            if any(k.startswith(params.PREFIX) for k in request.headers.keys()):
+                return {}, f"cannot check the Mcp-Param headers: the server does not list a tool {name!r}"
+            return {}, ""
+        return params.headers_for(hmap, args or {}), ""
+
+    async def _fetch_tools(self, request: Request, msg: dict) -> None:
+        """Ask the upstream for its tools (2026-07-28 requests stand alone, so this needs no session)."""
+        meta = msg["params"].get("_meta")
+        version = self._version(request, msg)
+        cursor = None
+        for page in range(20):
+            p: dict = {"_meta": meta} if isinstance(meta, dict) else {}
+            if cursor:
+                p["cursor"] = cursor
+            req_id = f"agent-guard-tools-{page}"
+            body = {"jsonrpc": "2.0", "id": req_id, "method": "tools/list", "params": p}
+            headers = {"accept": "application/json, text/event-stream", "content-type": "application/json",
+                       "mcp-protocol-version": version, "mcp-method": "tools/list", **self.upstream_headers}
+            try:
+                async with self.client.stream("POST", self.upstream, content=_line(body)[:-1], headers=headers) as r:
+                    if r.status_code != 200:
+                        return
+                    data = bytearray()
+                    async for chunk in r.aiter_bytes():
+                        data += chunk
+                        if len(data) > MAX_ANSWER:
+                            return
+                    ctype = r.headers.get("content-type", "")
+            except httpx2.HTTPError:
+                return
+            result = _answer(bytes(data), ctype, req_id)
+            if not isinstance(result, dict):
+                return
+            self.learn(result)
+            cursor = result.get("nextCursor")
+            if not isinstance(cursor, str) or not cursor:
+                return
 
     # ---- requests -------------------------------------------------------------------------
 
@@ -202,7 +284,7 @@ class Gateway:
             return refused
         if request.method == "POST":
             return await self._post(request)
-        return await self._forward(request, request.method, None, Watch(self.judge, None, None), None)
+        return await self._forward(request, request.method, None, Watch(self.judge, None, None, self.learn), None)
 
     async def _read_body(self, request: Request) -> bytes | Response:
         ctype = request.headers.get("content-type", "")
@@ -238,6 +320,12 @@ class Gateway:
         if mismatch:
             self.judge.log({"event": "rejected", "id": msg.get("id"), "reason": mismatch})
             return _error(msg.get("id"), HEADER_MISMATCH, mismatch, 400)
+        extra: dict[str, str] = {}
+        if msg.get("method") == "tools/call" and self._version(request, msg) >= MODERN:
+            extra, why = await self._param_headers(request, msg)
+            if why:
+                self.judge.log({"event": "rejected", "id": msg.get("id"), "reason": why})
+                return _error(msg.get("id"), HEADER_MISMATCH, why, 400)
         call = None
         if self.judge.judged(msg):
             verdict = self.judge.call(msg)
@@ -250,13 +338,15 @@ class Gateway:
             if "id" in msg:
                 call = (json.dumps(msg["id"], sort_keys=True), msg["id"], verdict.name, time.perf_counter_ns())
         list_id = None
-        if msg.get("method") == "tools/list" and "id" in msg and self.judge.policy.hide_denied_tools:
+        if msg.get("method") == "tools/list" and "id" in msg:
             list_id = json.dumps(msg["id"], sort_keys=True)
         # The upstream gets exactly what the policy judged, re-serialised from the parse.
-        return await self._forward(request, "POST", _line(msg)[:-1], Watch(self.judge, call, list_id), msg.get("id"))
+        watch = Watch(self.judge, call, list_id, self.learn)
+        return await self._forward(request, "POST", _line(msg)[:-1], watch, msg.get("id"), extra)
 
-    async def _forward(self, request: Request, method: str, body: bytes | None, watch: Watch, msg_id: Any) -> Response:
-        req = self.client.build_request(method, self.upstream, headers=self._headers(request, body is not None),
+    async def _forward(self, request: Request, method: str, body: bytes | None, watch: Watch, msg_id: Any,
+                       extra: dict[str, str] | None = None) -> Response:
+        req = self.client.build_request(method, self.upstream, headers=self._headers(request, body is not None, extra),
                                         content=body)
         try:
             upstream = await self.client.send(req, stream=True)

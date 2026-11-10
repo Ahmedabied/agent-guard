@@ -2,8 +2,10 @@
 JSON instead of an SSE stream."""
 
 import sys
+from typing import Annotated
 
 from mcp.server.mcpserver import MCPServer
+from pydantic import Field
 
 server = MCPServer("sdk-demo")
 
@@ -24,6 +26,13 @@ def delete_file(path: str) -> str:
 def drop_database(name: str) -> str:
     """Never reachable through the demo policy."""
     return f"dropped {name}"
+
+
+@server.tool()
+def forecast(region: Annotated[str, Field(json_schema_extra={"x-mcp-header": "Region"})],
+             days: Annotated[int, Field(json_schema_extra={"x-mcp-header": "Days"})] = 1) -> str:
+    """Region and days are mirrored into Mcp-Param headers on 2026-07-28, and the server checks them."""
+    return f"sunny in {region} for {days} days"
 
 
 if __name__ == "__main__":
