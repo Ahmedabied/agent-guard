@@ -335,8 +335,13 @@ case to `guard-tests.yaml`. It edits the text and then checks the parsed result:
 one with exactly one rule added in front, or nothing is written. An inline list (`rules: [...]`) is refused with a
 request to write it as a block list. Without `--match` it matches the exact values from the incident.
 
+Cases on `prompts/get` and `resources/read` are replayed with their guard: if someone turns `guard_prompts` or
+`guard_resources` off, those requests pass without any rule, so every case that expects them denied fails (rule
+`unguarded`) instead of staying green. For the same reason `learn` refuses to write a rule its guard would never
+run.
+
 `agent-guard check -p guard.yaml delete_file '{"path": "/data/notes/a.md"}'` shows the decision for one call
-without running anything (exit code 0 allow, 1 deny, 3 ask).
+without running anything (exit code 0 allow, 1 deny, 3 ask), guards included.
 
 ## How fast
 
@@ -394,7 +399,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk,http,otel]'
-pytest -q                      # 209 tests (10 need node)
+pytest -q                      # 213 tests (10 need node)
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on

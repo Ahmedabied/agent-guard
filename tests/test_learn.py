@@ -98,6 +98,41 @@ def test_learn_from_a_prompt_line(tmp_path):
     assert run_cases(policy, load_cases(tests)) == []
 
 
+@pytest.mark.parametrize("flag, tool, args", [
+    ("guard_prompts", "prompts/get", {"name": "dump_env"}),
+    ("guard_resources", "resources/read", {"uri": "file:///srv/a", "scheme": "file", "host": "", "path": "/srv/a"}),
+])
+def test_turning_a_guard_off_fails_the_cases_that_need_it(tmp_path, flag, tool, args):
+    # With the guard off those requests pass without any rule, so a case that expects deny must fail: otherwise
+    # switching the guard off would loosen the policy while agent-guard test stays green.
+    policy, tests = tmp_path / "guard.yaml", tmp_path / "t.yaml"
+    policy.write_text(POLICY.replace("default: deny\n", f"default: deny\n{flag}: true\n"))
+    learn(policy, tests, Incident(tool, args, "test"), "no-this", "never")
+    cases = load_cases(tests)
+    assert run_cases(policy, cases) == []
+    policy.write_text(policy.read_text().replace(f"{flag}: true\n", ""))
+    failures = run_cases(policy, cases)
+    assert [(f[1], f[2]) for f in failures] == [("allow", "unguarded")]
+
+
+def test_check_says_a_prompt_passes_when_its_guard_is_off(tmp_path):
+    policy = tmp_path / "guard.yaml"
+    policy.write_text(POLICY)
+    off = cli("check", "-p", str(policy), "prompts/get", '{"name": "dump_env"}')
+    assert off.returncode == 0 and "rule=unguarded" in off.stdout
+    policy.write_text(POLICY.replace("default: deny\n", "default: deny\nguard_prompts: true\n"))
+    on = cli("check", "-p", str(policy), "prompts/get", '{"name": "dump_env"}')
+    assert on.returncode == 1 and "rule=default" in on.stdout
+
+
+def test_learn_refuses_a_rule_its_guard_would_never_run(tmp_path):
+    policy, tests = tmp_path / "guard.yaml", tmp_path / "t.yaml"
+    policy.write_text(POLICY)  # guard_prompts is off
+    with pytest.raises(LearnError, match="guard_prompts"):
+        learn(policy, tests, Incident("prompts/get", {"name": "dump_env"}, "test"), "no-env", "never")
+    assert policy.read_text() == POLICY and not tests.exists()
+
+
 def test_learn_refuses_a_rule_that_misses_the_incident(tmp_path):
     policy = tmp_path / "guard.yaml"
     policy.write_text(POLICY)

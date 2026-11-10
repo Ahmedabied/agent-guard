@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import __version__
 from .audit import AuditLog, Scrubber, read_entries, verify
-from .learn import Incident, LearnError, incident_from_log, learn, load_cases, run_cases
+from .learn import Incident, LearnError, decide, incident_from_log, learn, load_cases, run_cases
 from .policy import Policy, PolicyError
 
 
@@ -96,7 +96,7 @@ def cmd_check(a) -> int:
     except ValueError as e:
         print(f"agent-guard check: arguments are not JSON: {e}", file=sys.stderr)
         return 2
-    d = policy.evaluate(a.tool, args, charge=False)
+    d = decide(policy, a.tool, args)  # guards included: a prompt with guard_prompts off passes
     print(f"{d.action}  rule={d.rule}  reason={d.reason}")
     return {"allow": 0, "deny": 1, "ask": 3}[d.action]
 

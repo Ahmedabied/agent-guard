@@ -17,7 +17,7 @@ from typing import Any
 import yaml
 
 from .audit import read_entries
-from .policy import Policy, PolicyError, load_yaml
+from .policy import Decision, Policy, PolicyError, load_yaml
 
 
 class LearnError(ValueError):
@@ -166,12 +166,25 @@ def append_case(path: str | Path, case: Case) -> None:
     path.write_text(old + text, encoding="utf-8")
 
 
+# Requests judged only when their guard is on: with it off they pass without any rule.
+GUARDS = {"resources/read": "guard_resources", "prompts/get": "guard_prompts"}
+
+
+def decide(policy: Policy, tool: str, args: Any) -> Decision:
+    """What agent-guard would do with this call, guards included: evaluate alone would judge a prompt or a read
+    even where the policy lets them pass unjudged."""
+    flag = GUARDS.get(tool)
+    if flag and not getattr(policy, flag):
+        return Decision("allow", "unguarded", f"{flag} is off, so {tool} passes without a rule")
+    return policy.evaluate(tool, args, charge=False)
+
+
 def run_cases(policy_path: str | Path, cases: list[Case]) -> list[tuple[Case, str, str]]:
     """Replay each case on a fresh policy. Returns the failures as (case, got, rule)."""
     failures = []
     for case in cases:
         policy = Policy.from_file(policy_path)  # fresh state: rate limits never leak between cases
-        d = policy.evaluate(case.tool, case.args, charge=False)
+        d = decide(policy, case.tool, case.args)
         if d.action != case.expect:
             failures.append((case, d.action, d.rule))
     return failures
@@ -184,13 +197,17 @@ def learn(policy_path: str | Path, tests_path: str | Path, incident: Incident, n
     policy = Policy.from_yaml(text, str(policy_path))
     if any(r.name == name for r in policy.rules):
         raise LearnError(f"{policy_path}: a rule named {name!r} already exists")
+    flag = GUARDS.get(incident.tool)
+    if flag and not getattr(policy, flag):
+        raise LearnError(f"{flag} is off in {policy_path}, so a rule on {incident.tool} would never run; "
+                         f"set {flag}: true first")
     rule = build_rule(incident, name, reason, match)
     new_text = insert_rule(text, rule, f"learned {date.today().isoformat()} from {incident.source}")
     try:
         new_policy = Policy.from_yaml(new_text, str(policy_path))
     except PolicyError as e:
         raise LearnError(f"the new rule would break the policy: {e}") from None
-    d = new_policy.evaluate(incident.tool, incident.args, charge=False)
+    d = decide(new_policy, incident.tool, incident.args)
     if d.action != "deny" or d.rule != name:
         raise LearnError(f"the new rule does not match the incident (got {d.action} from {d.rule}); check --match")
     policy_path.write_text(new_text, encoding="utf-8")
