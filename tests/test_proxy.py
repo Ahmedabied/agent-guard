@@ -393,6 +393,28 @@ def test_secret_prompt_arguments_are_scrubbed_in_the_log(tmp_path):
     assert call["args"]["arguments"] == {"api_key": "[redacted]", "note": "[redacted: looks like a secret]"}
 
 
+PROMPT_ASK = """
+default: deny
+guard_prompts: true
+ask: {via: command, command: [PY, -c, "import sys, json; d = json.load(sys.stdin); sys.exit(0 if d['arguments']['arguments']['ok'] == 'yes' else 1)"]}
+rules:
+  - {name: confirm-prompt, tool: prompts/get, decision: ask}
+"""
+
+
+def test_ask_on_a_prompt_sends_only_the_approved_one_on_stdio(tmp_path):
+    s = _open(tmp_path, PROMPT_ASK)
+    try:
+        yes = s.request("prompts/get", {"name": "plan", "arguments": {"ok": "yes"}})
+        no = s.request("prompts/get", {"name": "plan", "arguments": {"ok": "no"}})
+    finally:
+        s.close()
+    assert yes["result"]["messages"][0]["content"]["text"] == 'prompt plan with {"ok": "yes"}'
+    assert no["error"]["code"] == -32001 and "not approved" in no["error"]["message"]
+    events = [json.loads(line) for line in s.log.read_text().splitlines()]
+    assert [e["approved"] for e in events if e["event"] == "approval"] == [True, False]
+
+
 def test_prompts_pass_through_unless_guard_prompts_is_set(tmp_path):
     s = _open(tmp_path, POLICY)
     try:

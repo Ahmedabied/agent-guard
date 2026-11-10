@@ -83,6 +83,30 @@ def test_spans_never_carry_arguments_or_uris(spans):
                      "agent-guard tools/call delete_file", "agent-guard resources/read"]
 
 
+def test_spans_never_carry_a_prompts_name_or_arguments(spans):
+    judge = Judge(Policy.from_yaml("""
+default: deny
+guard_prompts: true
+rules:
+  - {name: no-keys, tool: prompts/get, args: {arguments.q: {glob: "tok-*"}}, decision: deny, reason: no keys}
+  - {name: prompts, tool: prompts/get, decision: allow}
+"""))
+    def get(name, args, i):
+        return {"jsonrpc": "2.0", "id": i, "method": "prompts/get", "params": {"name": name, "arguments": args}}
+    assert judge.call(get("quarterly-secret-plan", {"q": "hello-private"}, 1)).action == "allow"
+    assert judge.call(get("quarterly-secret-plan", {"q": "tok-456"}, 2)).action == "deny"
+    assert judge.call(get("quarterly-secret-plan", "tok-789", 3)).action == "deny"  # malformed
+    assert judge.call(call("prompts/get", {"q": "tok-000"}, 4)).action == "deny"  # a tool by the reserved name
+    for s in spans.get_finished_spans():
+        assert set(s.attributes) <= ALLOWED_KEYS
+        flat = json.dumps(dict(s.attributes)) + s.name
+        assert "secret-plan" not in flat and "private" not in flat and "tok-" not in flat
+    assert [s.name for s in spans.get_finished_spans()] == ["agent-guard prompts/get"] * 3 + \
+        ["agent-guard tools/call prompts/get"]
+    assert [s.attributes["agent_guard.rule"] for s in spans.get_finished_spans()] == \
+        ["prompts", "no-keys", "malformed", "reserved"]
+
+
 def test_client_chosen_names_and_ids_are_capped(spans):
     Judge(POLICY).call(call("x" * 5000, {}, "i" * 5000))
     [s] = spans.get_finished_spans()

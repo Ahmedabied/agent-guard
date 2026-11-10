@@ -13,6 +13,14 @@ const call = async (name, args) => {
   const r = await client.callTool({ name, arguments: args });
   return [Boolean(r.isError), r.content?.[0]?.text ?? ""];
 };
+const prompt = async (name, args) => {  // a blocked prompt is a JSON-RPC error made by the guard, not a result
+  try {
+    const r = await client.getPrompt({ name, arguments: args });
+    return ["ok", r.messages?.[0]?.content?.text ?? ""];
+  } catch (e) {
+    return ["error", e.code ?? null, String(e.message ?? e)];
+  }
+};
 const seen = {
   protocol: client.getNegotiatedProtocolVersion?.() ?? null,
   tools: (await client.listTools()).tools.map((t) => t.name).sort(),
@@ -20,6 +28,8 @@ const seen = {
   delete: await call("delete_file", { path: "/etc/passwd" }),
   drop: await call("drop_database", { name: "prod" }),
   forecast: await call("forecast", { region: "eu-west é", days: 3 }),
+  review: await prompt("review", { code: "x = 1" }),
+  leak: await prompt("leak_env", {}),
 };
 await client.close();
 console.log(JSON.stringify(seen));

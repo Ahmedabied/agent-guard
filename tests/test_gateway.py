@@ -396,6 +396,26 @@ def test_ask_runs_the_approver_and_only_an_approved_call_reaches_the_server(rig)
     assert [e["approved"] for e in r.audit_entries() if e["event"] == "approval"] == [True, False]
 
 
+PROMPT_ASK_POLICY = f"""
+default: deny
+guard_prompts: true
+ask: {{via: command, command: [{json.dumps(sys.executable)}, -c, "import sys, json; d = json.load(sys.stdin); sys.exit(0 if d['arguments']['arguments']['ok'] == 'yes' else 1)"]}}
+rules:
+  - {{name: confirm-prompt, tool: prompts/get, decision: ask, reason: prompts need a yes}}
+"""
+
+
+def test_ask_on_a_prompt_sends_only_the_approved_one(rig):
+    r = rig(policy=PROMPT_ASK_POLICY)
+    get = {"jsonrpc": "2.0", "method": "prompts/get"}
+    yes = r.post({**get, "id": 1, "params": {"name": "plan", "arguments": {"ok": "yes"}}})
+    no = r.post({**get, "id": 2, "params": {"name": "plan", "arguments": {"ok": "no"}}})
+    assert yes.json() == {"jsonrpc": "2.0", "id": 1, "result": {}}
+    assert no.json()["error"]["code"] == -32001 and "not approved" in no.json()["error"]["message"]
+    assert [json.loads(q["body"])["params"]["arguments"]["ok"] for q in r.upstream_requests()] == ["yes"]
+    assert [e["approved"] for e in r.audit_entries() if e["event"] == "approval"] == [True, False]
+
+
 RESOURCE_POLICY = """
 default: deny
 guard_resources: true

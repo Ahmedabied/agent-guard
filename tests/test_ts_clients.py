@@ -19,14 +19,17 @@ if not shutil.which("node") or not (TS / "node_modules" / "@modelcontextprotocol
     pytest.skip("needs node and npm install --prefix tests/ts", allow_module_level=True)
 pytest.importorskip("mcp")
 
-from test_gateway import Rig  # noqa: E402
+from test_gateway import POLICY, Rig  # noqa: E402
+
+TS_POLICY = POLICY.replace("hide_denied_tools: true\n", "hide_denied_tools: true\nguard_prompts: true\n") + \
+    "  - {name: review-prompt, tool: prompts/get, args: {name: review}, decision: allow}\n"
 
 
 @pytest.mark.parametrize("answers", ["sse", "json"])
 @pytest.mark.parametrize("client, mode, protocol", [("v1", "legacy", None), ("v2", "legacy", "2025-11-25"),
                                                      ("v2", "auto", "2026-07-28")])
 def test_typescript_client_through_gateway(tmp_path, client, mode, protocol, answers):
-    r = Rig(tmp_path, upstream="sdk", mode=answers)
+    r = Rig(tmp_path, upstream="sdk", mode=answers, policy=TS_POLICY)
     try:
         p = subprocess.run(["node", str(TS / "probe.mjs"), client, r.url, mode], capture_output=True, text=True,
                            timeout=60, cwd=TS)
@@ -41,3 +44,5 @@ def test_typescript_client_through_gateway(tmp_path, client, mode, protocol, ans
     assert seen["drop"][0] and "default is deny" in seen["drop"][1]
     # On 2026-07-28 the server refuses a call whose Mcp-Param headers are missing or wrong: these are the gateway's.
     assert seen["forecast"] == [False, "sunny in eu-west é for 3 days"]
+    assert seen["review"] == ["ok", "review this: x = 1"]
+    assert seen["leak"][:2] == ["error", -32001] and "default is deny" in seen["leak"][2], seen["leak"]

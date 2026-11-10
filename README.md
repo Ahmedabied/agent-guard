@@ -394,7 +394,7 @@ at most the result lines of calls still in flight; a power cut can lose the last
 
 ```sh
 pip install -e '.[test,sdk,http,otel]'
-pytest -q                      # 202 tests (10 need node)
+pytest -q                      # 205 tests (10 need node)
 ```
 
 The tests start real processes on real pipes. One suite drives agent-guard with the official MCP Python SDK on
