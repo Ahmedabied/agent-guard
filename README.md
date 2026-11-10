@@ -271,8 +271,14 @@ agent-guard serve -p guard.yaml --upstream https://mcp.example.com/mcp
 The span is `agent-guard tools/call <tool>` with `agent_guard.decision`, `agent_guard.rule` and, for a block, the
 policy's reason. Its parent is the trace the client sends in the request's `_meta` (MCP's W3C `traceparent`, which
 the official SDKs fill in), so the guard shows up inside the agent's own trace: an allowed call has the guard's
-span next to the server's, a blocked one has the guard's span and nothing from the server. A test runs the SDK
-client, the gateway and the SDK server against a stand-in collector and checks exactly that. Spans never carry
+span next to the server's, a blocked one has the guard's span and nothing from the server. The HTTP demo, traced
+and opened in Jaeger 2.23 (top: sandbox issue closed; bottom: the prod/ one, blocked):
+
+![Two agent steps in Jaeger: the allowed one reaches the tracker, the blocked one stops at agent-guard](docs/jaeger.png)
+
+CI does the same against a real Jaeger and reads the traces back from its API
+(`OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 python examples/http_demo.py`, then
+`python examples/jaeger_check.py`); a unit test checks it against a stand-in collector too. Spans never carry
 arguments or resource uris, which can hold anything; the audit log, with its scrubber, keeps those. Tracing
 cannot change or fail a decision: a span is written after the decision, any error in it is dropped, and with the
 collector down calls run as before. It costs about 15 us per call (stdio bench: 99 to 105 us added with tracing

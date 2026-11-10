@@ -31,4 +31,16 @@ def delete_repo(repo: str) -> str:
 
 
 if __name__ == "__main__":
+    import os
+
+    if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):  # the SDK server traces every request once a backend is set
+        from opentelemetry import trace
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+        provider = TracerProvider(resource=Resource.create({"service.name": "tracker"}))
+        provider.add_span_processor(SimpleSpanProcessor(OTLPSpanExporter()))
+        trace.set_tracer_provider(provider)
     server.run(transport="streamable-http", host="127.0.0.1", port=int(sys.argv[1]))
